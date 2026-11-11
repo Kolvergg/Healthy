@@ -1,0 +1,3 @@
+node_modules/
+*starter*.json
+.DS_Store
