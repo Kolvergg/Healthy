@@ -3,17 +3,51 @@ import * as db from './db.js';
 import * as core from './core.js';
 import * as N from './nutrition.js';
 import * as api from './api.js';
-import { esc, icon, sheet, toast, confirmSheet, promptSheet, ring, chart, daychips, readDays, toggleHtml } from './ui.js';
-import { state, register, rerender } from './state.js';
+import { esc, icon, sheet, liveSheet, toast, confirmSheet, promptSheet, ring, chart, bar, daychips, readDays, toggleHtml, pageHead, glassBtn, weekStrip } from './ui.js';
+import { state, register, rerender, push } from './state.js';
 
-const SUBS = [['water', 'Water'], ['meds', 'Meds'], ['sleep', 'Sleep'], ['body', 'Body'], ['workouts', 'Workouts'], ['journal', 'Journal']];
+const SUBS = [['water', 'Water', 'drop', 'var(--water)'], ['meds', 'Medication', 'pill', 'var(--meds)'], ['sleep', 'Sleep', 'moon', 'var(--sleep)'], ['body', 'Body', 'scale', 'var(--body)'], ['workouts', 'Workouts', 'dumbbell', 'var(--workout)'], ['journal', 'Journal', 'note', 'var(--journal)']];
+const SUB = Object.fromEntries(SUBS.map(x => [x[0], x]));
 
 export async function render() {
   const sub = state.sub.health;
-  const seg = `<div class="seg-wrap"><div class="seg">${SUBS.map(([k, l]) => `<button class="${sub === k ? 'on' : ''}" data-act="health-sub" data-v="${k}">${l}</button>`).join('')}</div></div>`;
-  const head = `<div class="page-head"><div class="eyebrow">Health</div><h1 class="title">${Object.fromEntries(SUBS)[sub] === 'Meds' ? 'Medication' : Object.fromEntries(SUBS)[sub]}</h1></div>`;
+  if (!sub || !SUB[sub]) return overview();
+  const [, title] = SUB[sub];
+  const actions = { water: glassBtn('water-settings', 'more', 'Water settings'), meds: glassBtn('med-manage', 'list', 'All medications') + glassBtn('med-edit', 'plus', 'Add medication'), sleep: glassBtn('sleep-schedule', 'clock', 'Sleep schedule'), body: glassBtn('weight-add', 'plus', 'Log weight'), workouts: glassBtn('template-edit', 'plus', 'New plan'), journal: glassBtn('journal-edit', 'plus', 'New entry') }[sub];
   const fn = { water: renderWater, meds: renderMeds, sleep: renderSleep, body: renderBody, workouts: renderWorkouts, journal: renderJournal }[sub];
-  return head + seg + (await fn());
+  return pageHead({ title, back: true, actions }) + (await fn());
+}
+
+async function overview() {
+  const s = await core.getSettings();
+  const t = core.today();
+  const water = await core.waterTotal(t);
+  const groups = await core.medDay(t);
+  const req = groups.flatMap(g => g.items).filter(i => !i.med.optional);
+  const taken = req.filter(i => i.status === 'taken' || i.status === 'skipped').length;
+  const nextMed = groups.find(g => g.items.some(i => i.status !== 'taken' && i.status !== 'skipped'));
+  const sl = (await db.byDate('sleep', t))[0];
+  const hrs = sl ? sl.hours ?? N.sleepMinutes(sl.bed, sl.wake) / 60 : null;
+  const w = (await db.all('weight')).sort((a, b) => a.date.localeCompare(b.date)).pop();
+  const weekStart = core.startOfWeek(t);
+  const wk = (await db.all('workouts')).filter(x => x.date >= weekStart).length;
+  const planned = (await db.all('templates')).reduce((a, x) => a + (x.days || []).length, 0);
+  const j = (await db.all('journal')).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const hk = (await db.all('health')).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const tile = (k, val, sub, extra = '') => {
+    const [, name, ic, color] = SUB[k];
+    return `<button class="tile" data-act="health-open" data-v="${k}"><div class="top"><span class="name"><span class="ico" style="background:${color};width:28px;height:28px;border-radius:9px">${icon(ic)}</span>${name}</span></div>${icon('chevR', 'chev')}<div class="val num">${val}</div>${extra}<div class="sub">${sub}</div></button>`;
+  };
+  return `${pageHead({ title: 'Health', sub: core.prettyDate(t, { weekday: 'long', day: 'numeric', month: 'long' }) })}
+  <div class="tiles">
+    ${tile('water', `${(water / 1000).toFixed(2).replace(/0$/, '')}<small> / ${(s.water.target / 1000).toFixed(1)} L</small>`, water >= s.water.target ? 'Target reached' : `${Math.max(0, s.water.target - water).toLocaleString('en-AU')} ml to go`, bar(water / s.water.target, 'var(--water)'))}
+    ${tile('meds', req.length ? `${taken}<small> / ${req.length} taken</small>` : '–', nextMed ? `Next: ${esc(nextMed.slot.name)} ${nextMed.time}` : req.length ? 'All done today' : 'Add your medications', req.length ? bar(taken / req.length, 'var(--meds)') : '')}
+    ${tile('sleep', hrs ? `${hrs.toFixed(1)}<small> h</small>` : '–', hrs ? 'Last night' : `Bed tonight ${s.sleep.nights[core.scheduleDay(s, t)].bed}`)}
+    ${tile('body', w ? `${w.kg.toFixed(1)}<small> kg</small>` : '–', w ? core.relDay(w.date) : hk && hk.steps ? `${Math.round(hk.steps).toLocaleString('en-AU')} steps` : 'Log weight')}
+    ${tile('workouts', `${wk}<small>${planned ? ` / ${planned}` : ''} this week</small>`, 'Plans, history, progress')}
+    ${tile('journal', j && j.date === t ? `${j.energy || '–'}<small> energy</small>` : '–', j ? `Last: ${core.relDay(j.date)}` : 'Energy, mood, migraines')}
+  </div>
+  ${hk ? `<div class="section-label">Apple Health</div><div class="card"><div class="grid3"><div class="stat"><div class="k">Steps</div><div class="v num">${hk.steps != null ? Math.round(hk.steps).toLocaleString('en-AU') : '–'}</div><div class="d">${core.relDay(hk.date)}</div></div><div class="stat"><div class="k">Exercise</div><div class="v num">${hk.exerciseMin != null ? Math.round(hk.exerciseMin) : '–'}</div><div class="d">minutes</div></div><div class="stat"><div class="k">Resting HR</div><div class="v num">${hk.restingHr != null ? Math.round(hk.restingHr) : '–'}</div><div class="d">bpm</div></div></div></div>` : ''}`;
 }
 
 const lastNDays = (n, end = core.today()) => Array.from({ length: n }, (_, i) => core.addDays(end, i - n + 1));
@@ -34,20 +68,28 @@ async function renderWater() {
   const perDay = days.map(d => rows.filter(r => r.date === d).reduce((a, r) => a + r.ml, 0));
   const last7 = perDay.slice(-7);
   const avg7 = N.mean(last7);
-  const prev7 = N.mean(perDay.slice(0, 7));
   const hit = last7.filter(v => v >= s.water.target).length;
   const todayLog = (await db.byDate('water', core.today())).sort((a, b) => (b.at || '').localeCompare(a.at || ''));
-  const r = s.water.reminders;
-  const wd = (x, k) => `<div class="fields three"><label class="field"><span>Start</span><input class="input sm" type="time" value="${x.start}" data-chg="water-rem" data-k="${k}.start"></label><label class="field"><span>End</span><input class="input sm" type="time" value="${x.end}" data-chg="water-rem" data-k="${k}.end"></label><label class="field"><span>Every (min)</span><input class="input sm num" type="number" min="15" step="15" value="${x.interval}" data-chg="water-rem" data-k="${k}.interval"></label></div>`;
   return `<div class="card">${waterCard(total, s.water.target, s.water.sizes)}</div>
-  <div class="card"><div class="card-head"><div class="h3">Last 14 days</div><span class="small muted">dashed = target</span></div>${chart(days.map((d, i) => ({ label: dayNum(d), value: perDay[i], color: perDay[i] >= s.water.target ? 'var(--water)' : 'color-mix(in srgb, var(--water) 45%, transparent)', tip: `${core.relDay(d)}: ${perDay[i].toLocaleString('en-AU')} ml` })), { kind: 'bar', target: s.water.target, color: 'var(--water)', unit: 'ml' })}
-  <div class="grid3" style="margin-top:12px"><div class="stat"><div class="k">7-day avg</div><div class="v num">${avg7 == null ? '—' : (avg7 / 1000).toFixed(2)}</div><div class="d">litres/day</div></div><div class="stat"><div class="k">vs prior week</div><div class="v num">${avg7 != null && prev7 ? `${avg7 >= prev7 ? '+' : ''}${Math.round(((avg7 - prev7) / prev7) * 100)}%` : '—'}</div><div class="d">average</div></div><div class="stat"><div class="k">Target hit</div><div class="v num">${hit}/7</div><div class="d">days</div></div></div></div>
-  <div class="section-label">Today's log</div><div class="card" style="padding:4px 14px"><div class="list">${todayLog.length ? todayLog.map(w => `<div class="li"><div class="main"><div class="t num">${w.ml} ml</div><div class="s">${new Date(w.at).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}</div></div><button class="icon-btn" data-act="water-del" data-id="${w.id}" aria-label="Delete">${icon('trash')}</button></div>`).join('') : '<div class="empty">Nothing logged yet today.</div>'}</div></div>
-  <div class="section-label">Target & reminders</div>
-  <div class="card stack"><div class="fields two"><label class="field"><span>Daily target (ml)</span><input class="input num" type="number" step="100" value="${s.water.target}" data-chg="water-target"></label><label class="field"><span>Quick-add sizes (ml)</span><input class="input" value="${s.water.sizes.join(', ')}" data-chg="water-sizes"></label></div>
-  <div class="row between"><div><div class="h3">Reminders</div><div class="small muted">Stop automatically once you hit your target.</div></div>${toggleHtml('water-on', r.enabled, 'data-chg="water-rem-on"')}</div>
-  <div class="small bold ink2">Weekdays</div>${wd(r.weekday, 'weekday')}<div class="small bold ink2">Weekends & holidays</div>${wd(r.weekend, 'weekend')}
-  <div class="row" style="gap:8px"><button class="btn sm" data-act="snooze" data-min="30" data-title="Water" data-body="Time for a glass of water.">Remind me in 30 min</button><button class="btn sm" data-act="notif-history">Notification history</button></div></div>`;
+  <div class="section-label">Last 14 days</div>
+  <div class="card">${chart(days.map((d, i) => ({ label: dayNum(d), value: perDay[i], color: perDay[i] >= s.water.target ? 'var(--water)' : 'color-mix(in srgb, var(--water) 45%, transparent)', tip: `${core.relDay(d)}: ${perDay[i].toLocaleString('en-AU')} ml` })), { kind: 'bar', target: s.water.target, color: 'var(--water)', unit: 'ml' })}
+  <div class="grid2" style="margin-top:12px"><div class="stat"><div class="k">7-day average</div><div class="v num">${avg7 == null ? '—' : (avg7 / 1000).toFixed(2)} L</div></div><div class="stat"><div class="k">Target hit</div><div class="v num">${hit}/7 days</div></div></div></div>
+  <div class="section-label">Today</div><div class="card flush"><div class="list">${todayLog.length ? todayLog.slice(0, 8).map(w => `<div class="li"><span class="ico" style="background:var(--water);width:30px;height:30px;border-radius:9px">${icon('drop')}</span><div class="main"><div class="t num">${w.ml} ml</div><div class="s">${new Date(w.at).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' })}</div></div><button class="icon-btn" data-act="water-del" data-id="${w.id}" aria-label="Delete">${icon('trash')}</button></div>`).join('') : '<div class="empty small">Nothing logged yet today.</div>'}</div></div>
+  <div class="row" style="gap:8px;margin-top:14px"><button class="btn sm grow" data-act="water-settings">${icon('bell')} Target & reminders</button><button class="btn sm grow" data-act="snooze" data-min="30" data-title="Water" data-body="Time for a glass of water." data-url="./?go=water">Remind in 30 min</button></div>`;
+}
+
+function waterSettings() {
+  liveSheet({
+    title: 'Water settings',
+    render: async () => {
+      const s = await core.getSettings();
+      const r = s.water.reminders;
+      const wd = (x, k) => `<div class="fields three"><label class="field"><span>From</span><input class="input sm" type="time" value="${x.start}" data-chg="water-rem" data-k="${k}.start"></label><label class="field"><span>Until</span><input class="input sm" type="time" value="${x.end}" data-chg="water-rem" data-k="${k}.end"></label><label class="field"><span>Every (min)</span><input class="input sm num" type="number" min="15" step="15" value="${x.interval}" data-chg="water-rem" data-k="${k}.interval"></label></div>`;
+      return `<div class="card stack"><div class="fields two"><label class="field"><span>Daily target (ml)</span><input class="input num" type="number" step="100" value="${s.water.target}" data-chg="water-target"></label><label class="field"><span>Quick sizes (ml)</span><input class="input" value="${s.water.sizes.join(', ')}" data-chg="water-sizes"></label></div></div>
+      <div class="card stack" style="margin-top:12px"><div class="row between"><div><div class="h3">Reminders</div><div class="small muted">Stop once you hit your target.</div></div>${toggleHtml('water-on', r.enabled, 'data-chg="water-rem-on"')}</div>
+      <div class="small bold ink2">Weekdays</div>${wd(r.weekday, 'weekday')}<div class="small bold ink2">Weekends & holidays</div>${wd(r.weekend, 'weekend')}</div>`;
+    },
+  });
 }
 
 // ---------------- MEDS ----------------
@@ -76,14 +118,27 @@ async function renderMeds() {
     const taken = req.filter(m => logs.some(l => l.date === d && l.medId === m.id && l.status === 'taken')).length;
     adherence.push({ d, cls: taken === req.length ? 'full' : taken ? 'part' : d === core.today() ? '' : 'none', t: `${taken}/${req.length}` });
   }
-  let html = `<div class="date-nav"><button class="icon-btn" data-act="date-shift" data-v="-1">${icon('chevL')}</button><span class="lbl">${core.relDay(date)}</span><button class="icon-btn" data-act="date-shift" data-v="1">${icon('chevR')}</button></div>`;
+  const marks = {};
+  for (const a of adherence) marks[a.d] = a.cls === 'full' ? 'full' : a.cls === 'part' ? 'part' : '';
+  let html = weekStrip(date, { act: 'date-pick', marks, todayYmd: core.today(), addDays: core.addDays, parseYmd: core.parseYmd });
   if (low.length) html += `<div class="notice warn" style="margin-bottom:12px"><b>Refill soon:</b> ${low.map(m => `${esc(m.name)} (${m.stock} left)`).join(', ')}</div>`;
-  if (!meds.length) html += `<div class="card empty"><b>No medications yet</b>Add each medication or supplement with its exact prescribed dose. You can also import a starter file in Settings → Data.</div>`;
-  for (const g of groups) html += `<div class="section-label row between"><span>${esc(g.slot.name)} · <span class="num">${g.time}</span></span><button class="link" data-act="med-slot-all" data-date="${date}" data-slot="${g.slot.id}">Mark all taken</button></div><div class="card" style="padding:4px 14px"><div class="list">${g.items.map(it => medRow(date, g, it)).join('')}</div></div>`;
-  html += `<div class="card" style="margin-top:14px"><div class="card-head"><div class="h3">Adherence · 14 days</div><span class="small muted">required doses</span></div><div class="adherence">${adherence.map(a => `<i class="${a.cls}" title="${a.d}: ${a.t || 'n/a'}"></i>`).join('')}</div><div class="row small muted" style="gap:12px;margin-top:8px"><span><span class="dot" style="background:var(--good)"></span> all</span><span><span class="dot" style="background:var(--warn)"></span> some</span><span><span class="dot" style="background:var(--bad)"></span> none logged</span></div></div>`;
-  html += `<div class="section-label row between"><span>All medications & supplements</span><button class="icon-btn" data-act="med-edit" aria-label="Add">${icon('plus')}</button></div><div class="card" style="padding:4px 14px"><div class="list">${meds.length ? meds.sort((a, b) => (a.active === b.active ? 0 : a.active ? -1 : 1) || a.name.localeCompare(b.name)).map(m => `<div class="li tap" data-act="med-edit" data-id="${m.id}"><div class="main"><div class="t">${esc(m.name)} <span class="muted" style="font-weight:500">${esc(m.dose || '')}</span></div><div class="s">${esc(slotNames[m.slotId] || 'No time')}${m.stock != null && m.stock !== '' ? ` · ${m.stock} left` : ''}${m.active ? '' : ' · paused'}</div></div>${m.active ? '' : '<span class="badge">Paused</span>'}${m.kind === 'supplement' ? '<span class="badge">Supp</span>' : ''}</div>`).join('') : '<div class="empty">Tap + to add one.</div>'}</div></div>`;
-  html += `<p class="tiny muted" style="margin:12px 6px">This app only records what you enter. It never changes doses or tells you what to do after a missed dose — use the instructions from your pharmacist or the medicine's leaflet (CMI), which you can paste into each medication.</p>`;
+  if (!meds.length) html += `<div class="card empty"><b>No medications yet</b>Tap + to add each medication with its exact prescribed dose, or import your starter file in Settings → Data.</div>`;
+  for (const g of groups) html += `<div class="section-label row between"><span>${esc(g.slot.name)} <span class="muted num" style="font-weight:600">${g.time}</span></span>${g.items.some(i => i.status !== 'taken' && i.status !== 'skipped') ? `<button class="link" data-act="med-slot-all" data-date="${date}" data-slot="${g.slot.id}">All taken</button>` : `<span class="badge good">Done</span>`}</div><div class="card flush"><div class="list">${g.items.map(it => medRow(date, g, it)).join('')}</div></div>`;
+  if (meds.length) html += `<div class="section-label">Last 14 days</div><div class="card"><div class="adherence">${adherence.map(a => `<i class="${a.cls}" title="${a.d}: ${a.t || 'n/a'}"></i>`).join('')}</div><div class="row small muted" style="gap:12px;margin-top:10px"><span><span class="dot" style="background:var(--good)"></span> all</span><span><span class="dot" style="background:var(--warn)"></span> some</span><span><span class="dot" style="background:var(--bad)"></span> none logged</span></div></div>`;
   return html;
+}
+
+function medManage() {
+  liveSheet({
+    title: 'All medications',
+    render: async () => {
+      const meds = await db.all('meds');
+      const slotNames = Object.fromEntries((await core.getSettings()).medSlots.map(x => [x.id, x.name]));
+      return `<div class="card flush"><div class="list">${meds.length ? meds.sort((a, b) => (a.active === b.active ? 0 : a.active ? -1 : 1) || a.name.localeCompare(b.name)).map(m => `<div class="li tap" data-act="med-edit" data-id="${m.id}"><span class="ico" style="background:${m.active ? 'var(--meds)' : 'var(--ink-3)'}">${icon('pill')}</span><div class="main"><div class="t">${esc(m.name)} <span class="muted" style="font-weight:500">${esc(m.dose || '')}</span></div><div class="s">${esc(slotNames[m.slotId] || 'No time')}${m.stock != null && m.stock !== '' ? ` · ${m.stock} left` : ''}${m.active ? '' : ' · paused'}${m.kind === 'supplement' ? ' · supplement' : ''}</div></div>${icon('chevR')}</div>`).join('') : '<div class="empty">No medications yet.</div>'}</div></div>
+      <button class="btn primary block" style="margin-top:14px" data-act="med-edit">${icon('plus')} Add medication</button>
+      <p class="tiny muted" style="margin:14px 6px">HealthOS only records what you enter. It never changes doses or tells you what to do after a missed dose — use your pharmacist's instructions or the medicine leaflet (CMI), which you can paste into each medication. Times are set in Settings → Medication times.</p>`;
+    },
+  });
 }
 
 async function medEditor(id) {
@@ -185,13 +240,13 @@ async function renderSleep() {
   const tonight = s.sleep.nights[wdIdx];
   const tomorrow = s.sleep.nights[core.scheduleDay(s, core.addDays(core.today(), 1))];
   const target = N.sleepMinutes(tonight.bed, tomorrow.wake) / 60;
-  const recent = logs.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 10);
+  const recent = logs.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
   return `<div class="card"><div class="row between"><div><div class="eyebrow">Tonight</div><div class="big-num num">${tonight.bed}</div><div class="small muted">wake ${tomorrow.wake} · ${target.toFixed(1)} h opportunity${core.holidayActive(s, core.today()) ? ' · holiday schedule' : ''}</div></div>${ring(avg ? avg / target : 0, { size: 92, stroke: 9, color: 'var(--sleep)', inner: `<div class="num bold">${avg ? avg.toFixed(1) : '—'}</div><div class="tiny muted">7-day h</div>` })}</div>
   <div class="row" style="gap:8px;margin-top:14px"><button class="btn primary grow" data-act="sleep-log">Log last night</button><button class="btn" data-act="sleep-schedule">Schedule</button></div></div>
-  <div class="card"><div class="card-head"><div class="h3">Sleep duration</div><span class="small muted">hours</span></div>${chart(days.map((d, i) => ({ label: dayNum(d), value: hours[i], tip: hours[i] == null ? `${core.relDay(d)}: not logged` : `${core.relDay(d)}: ${hours[i].toFixed(1)} h` })), { kind: 'bar', color: 'var(--sleep)', target, fmt: v => v.toFixed(0) })}
+  <div class="section-label">Last 14 nights</div><div class="card">${chart(days.map((d, i) => ({ label: dayNum(d), value: hours[i], tip: hours[i] == null ? `${core.relDay(d)}: not logged` : `${core.relDay(d)}: ${hours[i].toFixed(1)} h` })), { kind: 'bar', color: 'var(--sleep)', target, fmt: v => v.toFixed(0) })}
   <div class="grid3" style="margin-top:12px"><div class="stat"><div class="k">7-day avg</div><div class="v num">${avg ? avg.toFixed(1) : '—'}</div><div class="d">hours</div></div><div class="stat"><div class="k">Bedtime spread</div><div class="v num">${sd == null ? '—' : '±' + Math.round(sd)}</div><div class="d">minutes (SD)</div></div><div class="stat"><div class="k">Logged</div><div class="v num">${hours.filter(h => h != null).length}/14</div><div class="d">nights</div></div></div></div>
-  <div class="section-label">Recent</div><div class="card" style="padding:4px 14px"><div class="list">${recent.length ? recent.map(l => `<div class="li tap" data-act="sleep-log" data-id="${l.id}"><div class="main"><div class="t">${core.relDay(l.date)}</div><div class="s">${l.bed ? `${l.bed} → ${l.wake} · ` : ''}${(l.hours ?? N.sleepMinutes(l.bed, l.wake) / 60).toFixed(1)} h${l.quality ? ` · quality ${l.quality}/5` : ''}</div></div>${l.source === 'Apple Health' ? '<span class="badge apple">Apple Health</span>' : ''}</div>`).join('') : '<div class="empty">No sleep logged yet.</div>'}</div></div>
-  <p class="tiny muted" style="margin:12px 6px">For waking up, use the iPhone Clock alarm — web notifications can't play alarm sounds or break through Silent mode.</p>`;
+  <div class="section-label">Recent</div><div class="card flush"><div class="list">${recent.length ? recent.map(l => `<div class="li tap" data-act="sleep-log" data-id="${l.id}"><div class="main"><div class="t">${core.relDay(l.date)}</div><div class="s">${l.bed ? `${l.bed} → ${l.wake} · ` : ''}${(l.hours ?? N.sleepMinutes(l.bed, l.wake) / 60).toFixed(1)} h${l.quality ? ` · quality ${l.quality}/5` : ''}</div></div>${l.source === 'Apple Health' ? '<span class="badge apple">Apple Health</span>' : ''}</div>`).join('') : '<div class="empty">No sleep logged yet.</div>'}</div></div>
+  <p class="tiny muted" style="margin:14px 6px">For waking up, use the iPhone Clock alarm — web notifications can't play alarm sounds or break through Silent mode.</p>`;
 }
 
 async function sleepLog(id) {
@@ -254,10 +309,10 @@ async function renderBody() {
   const w = (await db.all('weight')).sort((a, b) => a.date.localeCompare(b.date));
   const last90 = w.filter(x => x.date >= core.addDays(core.today(), -90));
   const hk = (await db.all('health')).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 7);
-  return `<div class="card"><div class="row between"><div><div class="eyebrow">Latest weight</div><div class="big-num num">${w.length ? w[w.length - 1].kg.toFixed(1) : '—'}<span class="muted" style="font-size:16px"> kg</span></div><div class="small muted">${w.length ? core.relDay(w[w.length - 1].date) : 'Not logged yet'}</div></div><button class="btn primary" data-act="weight-add">Log weight</button></div>
+  return `<div class="card"><div class="row between"><div><div class="eyebrow">Latest weight</div><div class="big-num num">${w.length ? w[w.length - 1].kg.toFixed(1) : '—'}<span class="muted" style="font-size:16px"> kg</span></div><div class="small muted">${w.length ? core.relDay(w[w.length - 1].date) : 'Not logged yet'}</div></div><button class="btn sm primary" data-act="weight-add">Log weight</button></div>
   <div style="margin-top:14px">${chart(last90.map(x => ({ label: core.parseYmd(x.date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' }), value: x.kg, tip: `${core.relDay(x.date)}: ${x.kg.toFixed(1)} kg${x.source === 'Apple Health' ? ' (Apple Health)' : ''}` })), { kind: 'line', color: 'var(--accent)', fmt: v => v.toFixed(1), yMin: -1 })}</div></div>
-  <div class="section-label">History</div><div class="card" style="padding:4px 14px"><div class="list">${w.length ? w.slice().reverse().slice(0, 20).map(x => `<div class="li"><div class="main"><div class="t num">${x.kg.toFixed(1)} kg</div><div class="s">${core.relDay(x.date)}</div></div>${x.source === 'Apple Health' ? '<span class="badge apple">Apple Health</span>' : `<button class="icon-btn" data-act="weight-del" data-id="${x.id}">${icon('trash')}</button>`}</div>`).join('') : '<div class="empty">No entries.</div>'}</div></div>
-  <div class="section-label">Activity (Apple Health)</div><div class="card">${hk.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Day</th><th class="n">Steps</th><th class="n">Exercise</th><th class="n">Rest HR</th></tr></thead><tbody>${hk.map(h => `<tr><td>${core.relDay(h.date)}</td><td class="n">${h.steps != null ? Math.round(h.steps).toLocaleString('en-AU') : '—'}</td><td class="n">${h.exerciseMin != null ? Math.round(h.exerciseMin) + ' min' : '—'}</td><td class="n">${h.restingHr != null ? Math.round(h.restingHr) : '—'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty small">No Apple Health data yet. Set up the iOS Shortcut described in the README, then tap Sync in Settings.</div>`}</div>`;
+  <div class="section-label">Recent</div><div class="card flush"><div class="list">${w.length ? w.slice().reverse().slice(0, 5).map(x => `<div class="li"><div class="main"><div class="t num">${x.kg.toFixed(1)} kg</div><div class="s">${core.relDay(x.date)}</div></div>${x.source === 'Apple Health' ? '<span class="badge apple">Apple Health</span>' : `<button class="icon-btn" data-act="weight-del" data-id="${x.id}">${icon('trash')}</button>`}</div>`).join('') : '<div class="empty">No entries.</div>'}</div></div>
+  <div class="section-label">Activity (Apple Health)</div><div class="card">${hk.length ? `<div class="table-wrap"><table class="t"><thead><tr><th>Day</th><th class="n">Steps</th><th class="n">Exercise</th><th class="n">Rest HR</th></tr></thead><tbody>${hk.map(h => `<tr><td>${core.relDay(h.date)}</td><td class="n">${h.steps != null ? Math.round(h.steps).toLocaleString('en-AU') : '—'}</td><td class="n">${h.exerciseMin != null ? Math.round(h.exerciseMin) + ' min' : '—'}</td><td class="n">${h.restingHr != null ? Math.round(h.restingHr) : '—'}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty small">No Apple Health data yet. <button class="link" data-act="push" data-page="settings">Connect Apple Health</button></div>`}</div>`;
 }
 
 // ---------------- WORKOUTS ----------------
@@ -291,11 +346,17 @@ async function renderWorkouts() {
   const weekStart = core.startOfWeek(core.today());
   const thisWeek = hist.filter(w => w.date >= weekStart).length;
   const exNames = [...new Set(hist.flatMap(w => (w.exercises || []).map(e => e.name)))].sort();
-  return `<div class="card"><div class="row between"><div><div class="eyebrow">This week</div><div class="big-num num">${thisWeek}</div><div class="small muted">workouts logged</div></div><button class="btn primary" data-act="workout-start">${icon('plus')} Log workout</button></div></div>
-  <div class="section-label row between"><span>Plans</span><button class="icon-btn" data-act="template-edit">${icon('plus')}</button></div>
-  <div class="card" style="padding:4px 14px"><div class="list">${templates.length ? templates.map(t => `<div class="li"><div class="main tap" data-act="template-edit" data-id="${t.id}"><div class="t">${esc(t.name)} ${(t.days || []).includes(wd) ? '<span class="badge good">Today</span>' : ''}</div><div class="s">${(t.days || []).map(d => core.DAY_SHORT[d]).join(' ')}${t.time ? ' · ' + t.time : ''} · ${(t.exercises || []).length} exercises</div></div><button class="btn sm" data-act="workout-start" data-id="${t.id}">Start</button></div>`).join('') : '<div class="empty">Create a plan (e.g. Push, Pull, Legs) with days and an optional reminder time.</div>'}</div></div>
-  <div class="section-label">History</div><div class="card" style="padding:4px 14px"><div class="list">${hist.length ? hist.slice(0, 15).map(w => `<div class="li tap" data-act="workout-open" data-id="${w.id}"><div class="main"><div class="t">${esc(w.name || 'Workout')}</div><div class="s">${core.relDay(w.date)} · ${(w.exercises || []).length} exercises · ${(w.exercises || []).reduce((a, e) => a + (e.sets || []).length, 0)} sets</div></div></div>`).join('') : '<div class="empty">No workouts yet.</div>'}</div></div>
-  ${exNames.length ? `<div class="section-label">Exercise library</div><div class="card" style="padding:4px 14px"><div class="list">${(await Promise.all(exNames.map(async n => ({ n, last: await lastFor(n) })))).map(({ n, last }) => { const b = last && bestSet(last.sets); return `<div class="li tap" data-act="exercise-open" data-name="${esc(n)}"><div class="main"><div class="t">${esc(n)}</div><div class="s">${b ? `Last best ${b.reps} × ${b.kg ?? 0} kg · ${core.relDay(last.date)}` : ''}</div></div></div>`; }).join('')}</div></div>` : ''}`;
+  return `<div class="card"><div class="row between"><div><div class="eyebrow">This week</div><div class="big-num num">${thisWeek}</div><div class="small muted">workouts logged</div></div><button class="btn sm primary" data-act="workout-start">${icon('plus')} Log workout</button></div></div>
+  <div class="section-label">Plans</div>
+  <div class="card flush"><div class="list">${templates.length ? templates.map(t => `<div class="li"><div class="main tap" data-act="template-edit" data-id="${t.id}"><div class="t">${esc(t.name)} ${(t.days || []).includes(wd) ? '<span class="badge good">Today</span>' : ''}</div><div class="s">${(t.days || []).map(d => core.DAY_SHORT[d]).join(' ')}${t.time ? ' · ' + t.time : ''} · ${(t.exercises || []).length} exercises</div></div><button class="btn sm" data-act="workout-start" data-id="${t.id}">Start</button></div>`).join('') : '<div class="empty">Create a plan (e.g. Push, Pull, Legs) with days and an optional reminder time.</div>'}</div></div>
+  <div class="section-label row between"><span>History</span>${exNames.length ? '<button class="link" data-act="exercise-library">Exercises</button>' : ''}</div><div class="card flush"><div class="list">${hist.length ? hist.slice(0, 6).map(w => `<div class="li tap" data-act="workout-open" data-id="${w.id}"><div class="main"><div class="t">${esc(w.name || 'Workout')}</div><div class="s">${core.relDay(w.date)} · ${(w.exercises || []).length} exercises · ${(w.exercises || []).reduce((a, e) => a + (e.sets || []).length, 0)} sets</div></div></div>`).join('') : '<div class="empty">No workouts yet.</div>'}</div></div>
+`;
+}
+
+async function exerciseLibrary() {
+  const hist = await db.all('workouts');
+  const exNames = [...new Set(hist.flatMap(w => (w.exercises || []).map(e => e.name)))].sort();
+  sheet({ title: 'Exercises', body: `<div class="card flush"><div class="list">${(await Promise.all(exNames.map(async n => ({ n, last: await lastFor(n) })))).map(({ n, last }) => { const b = last && bestSet(last.sets); return `<div class="li tap" data-act="exercise-open" data-name="${esc(n)}"><div class="main"><div class="t">${esc(n)}</div><div class="s">${b ? `Last best ${b.reps} × ${b.kg ?? 0} kg · ${core.relDay(last.date)}` : ''}</div></div>${icon('chevR')}</div>`; }).join('')}</div></div>` });
 }
 
 async function templateEditor(id) {
@@ -412,7 +473,7 @@ async function renderJournal() {
   const energy = N.mean(last30.map(j => j.energy));
   const mood = N.mean(last30.map(j => j.mood));
   return `<div class="card"><div class="grid3"><div class="stat"><div class="k">Energy</div><div class="v num">${energy ? energy.toFixed(1) : '—'}</div><div class="d">30-day avg /5</div></div><div class="stat"><div class="k">Mood</div><div class="v num">${mood ? mood.toFixed(1) : '—'}</div><div class="d">30-day avg /5</div></div><div class="stat"><div class="k">Migraines</div><div class="v num">${mig.length}</div><div class="d">last 30 days</div></div></div><button class="btn primary block" style="margin-top:12px" data-act="journal-edit">${icon('plus')} New entry</button></div>
-  <div class="section-label">Entries</div><div class="card" style="padding:4px 14px"><div class="list">${all.length ? all.slice(0, 40).map(j => `<div class="li tap" data-act="journal-edit" data-id="${j.id}"><div class="main"><div class="t">${core.relDay(j.date)}${j.migraine && j.migraine.yes ? ` <span class="badge bad">Migraine ${j.migraine.severity || ''}</span>` : ''}</div><div class="s">${[j.energy && `Energy ${j.energy}/5`, j.mood && `Mood ${j.mood}/5`, j.symptoms].filter(Boolean).map(esc).join(' · ') || esc((j.notes || '').slice(0, 60))}</div></div></div>`).join('') : '<div class="empty">Log energy, mood, migraines and symptoms. Patterns show up in Statistics.</div>'}</div></div>
+  <div class="section-label">Entries</div><div class="card flush"><div class="list">${all.length ? all.slice(0, 15).map(j => `<div class="li tap" data-act="journal-edit" data-id="${j.id}"><div class="main"><div class="t">${core.relDay(j.date)}${j.migraine && j.migraine.yes ? ` <span class="badge bad">Migraine ${j.migraine.severity || ''}</span>` : ''}</div><div class="s">${[j.energy && `Energy ${j.energy}/5`, j.mood && `Mood ${j.mood}/5`, j.symptoms].filter(Boolean).map(esc).join(' · ') || esc((j.notes || '').slice(0, 60))}</div></div></div>`).join('') : '<div class="empty">Log energy, mood, migraines and symptoms. Patterns show up in Statistics.</div>'}</div></div>
   <p class="tiny muted" style="margin:12px 6px">Health appointments live in Planner → Tasks with the “Appointment” category, so they get reminders.</p>`;
 }
 
@@ -458,8 +519,13 @@ async function saveWaterRem(path, value) {
   await core.saveSettings({ water: { reminders: r } });
 }
 register({
-  'health-sub': el => {
-    state.sub.health = el.dataset.v;
+  'health-sub': el => push('health:' + el.dataset.v),
+  'health-open': el => push('health:' + el.dataset.v),
+  'water-settings': () => waterSettings(),
+  'med-manage': () => medManage(),
+  'exercise-library': () => exerciseLibrary(),
+  'date-pick': el => {
+    state.date = el.dataset.date;
     rerender();
   },
   'water-add': async el => {

@@ -2,22 +2,23 @@
 import * as db from './db.js';
 import * as core from './core.js';
 import * as N from './nutrition.js';
-import { esc, icon, sheet, toast, confirmSheet, daychips, readDays, toggleHtml, initials } from './ui.js';
-import { state, register, rerender } from './state.js';
+import { esc, icon, sheet, toast, confirmSheet, daychips, readDays, toggleHtml, initials, pageHead, glassBtn } from './ui.js';
+import { state, register, rerender, setSub } from './state.js';
 import { recipeDetail, generateSheet, targetBars } from './food.js';
 
-const SUBS = [['tasks', 'Tasks'], ['routines', 'Routines'], ['timetable', 'Timetable'], ['meals', 'Meal plan']];
+const SUBS = [['tasks', 'Tasks'], ['routines', 'Routines'], ['timetable', 'Timetable']];
 export const CATEGORIES = ['Task', 'Assignment', 'Study', 'Appointment', 'Personal'];
 const PLAN_SLOTS = ['breakfast', 'lunch', 'dinner', 'snack'];
 const PLAN_TO_DIARY = { breakfast: 'breakfast', lunch: 'lunch', dinner: 'dinner', snack: 'afternoon-snack' };
 
 export async function render() {
-  const sub = state.sub.planner;
+  const sub = SUBS.some(x => x[0] === state.sub.planner) ? state.sub.planner : 'tasks';
   const seg = `<div class="seg-wrap"><div class="seg">${SUBS.map(([k, l]) => `<button class="${sub === k ? 'on' : ''}" data-act="planner-sub" data-v="${k}">${l}</button>`).join('')}</div></div>`;
-  const head = `<div class="page-head"><div class="eyebrow">Planner</div><h1 class="title">${Object.fromEntries(SUBS)[sub]}</h1></div>`;
-  const fn = { tasks: renderTasks, routines: renderRoutines, timetable: renderTimetable, meals: renderMeals }[sub];
-  return head + seg + (await fn());
+  const add = { tasks: glassBtn('task-edit', 'plus', 'New task'), routines: glassBtn('routine-edit', 'plus', 'New routine'), timetable: glassBtn('class-edit', 'plus', 'Add class') }[sub];
+  const fn = { tasks: renderTasks, routines: renderRoutines, timetable: renderTimetable }[sub];
+  return pageHead({ title: 'Plan', actions: add }) + seg + (await fn());
 }
+export const renderMealPlan = () => renderMeals();
 
 // ---------------- TASKS ----------------
 export function taskRow(t) {
@@ -37,13 +38,13 @@ async function renderTasks() {
     ['Someday', open.filter(x => !x.date)],
   ];
   const done = all.filter(x => x.done).sort((a, b) => (b.doneAt || 0) - (a.doneAt || 0));
-  let html = `<button class="btn primary block" data-act="task-edit">${icon('plus')} New task, assignment or appointment</button>`;
+  let html = `<div class="card row" style="padding:6px 8px 6px 16px"><span class="check" style="border-style:dashed"></span><input class="input grow" placeholder="Quick add for today…" data-act-enter="quick-add-task" style="background:transparent;border:0;padding-left:4px"><button class="btn sm" data-act="task-edit">Details</button></div>`;
   for (const [name, list] of groups) {
     if (!list.length) continue;
-    html += `<div class="section-label">${name}</div><div class="card" style="padding:4px 14px"><div class="list">${list.sort(sort).map(taskRow).join('')}</div></div>`;
+    html += `<div class="section-label">${name}</div><div class="card flush"><div class="list">${list.sort(sort).map(taskRow).join('')}</div></div>`;
   }
-  if (!open.length) html += `<div class="card empty" style="margin-top:12px"><b>All clear</b>Nothing open.</div>`;
-  if (done.length) html += `<div class="section-label row between"><span>Completed</span><button class="link" data-act="toggle-done">${state.showDone ? 'Hide' : 'Show'}</button></div>${state.showDone ? `<div class="card" style="padding:4px 14px"><div class="list">${done.slice(0, 30).map(taskRow).join('')}</div></div>` : ''}`;
+  if (!open.length) html += `<div class="card empty" style="margin-top:12px"><b>All clear</b>Nothing open. Tap + for a task, assignment or appointment.</div>`;
+  if (done.length) html += `<div class="section-label row between"><span>Completed</span><button class="link" data-act="toggle-done">${state.showDone ? 'Hide' : `Show ${done.length}`}</button></div>${state.showDone ? `<div class="card flush"><div class="list">${done.slice(0, 30).map(taskRow).join('')}</div></div>` : ''}`;
   return html;
 }
 
@@ -90,14 +91,16 @@ async function renderRoutines() {
   const list = (await core.routinesFor(core.today())).map(x => x.routine.id);
   const all = (await db.all('routines')).sort((a, b) => (core.toMin(a.time) ?? 9999) - (core.toMin(b.time) ?? 9999));
   const today = await core.routinesFor(core.today());
-  let html = `<button class="btn primary block" data-act="routine-edit">${icon('plus')} New routine or checklist</button>`;
-  if (!all.length) html += `<div class="card empty" style="margin-top:12px"><b>No routines yet</b>Create a morning routine, evening wind-down, skincare AM/PM or any checklist. Each can have its own days and reminder.</div>`;
+  let html = '';
+  if (!all.length) html += `<div class="card empty"><b>No routines yet</b>Tap + to create a morning routine, evening wind-down, skincare AM/PM or any checklist — each with its own days and reminder.</div>`;
   for (const r of all) {
     const t = today.find(x => x.routine.id === r.id);
     const active = list.includes(r.id);
-    const done = t ? t.items.filter(i => i.done).length : 0;
-    html += `<div class="section-label row between"><span>${esc(r.name)}${r.time ? ` · <span class="num">${r.time}</span>` : ''}${active ? ` · ${done}/${(r.items || []).length}` : ' · not today'}</span><button class="link" data-act="routine-edit" data-id="${r.id}">Edit</button></div>
-    <div class="card" style="padding:4px 14px"><div class="list">${(t ? t.items : (r.items || []).map(i => ({ ...i, done: false }))).map(i => `<div class="li ${i.done ? 'done' : ''}">${active ? `<button class="check ${i.done ? 'on' : ''}" data-act="check-toggle" data-r="${r.id}" data-i="${i.id}">${icon('check')}</button>` : `<span class="check" style="opacity:.4"></span>`}<div class="main"><div class="t">${esc(i.text)}</div></div></div>`).join('') || '<div class="empty small">No steps.</div>'}</div></div>`;
+    const items = t ? t.items : (r.items || []).map(i => ({ ...i, done: false }));
+    const done = items.filter(i => i.done).length;
+    const complete = active && items.length && done === items.length;
+    html += `<div class="card" style="padding:14px 16px 6px;margin-top:12px"><div class="row between"><div><div class="h2">${esc(r.name)}</div><div class="small muted">${r.time ? `${r.time}${r.remind !== false ? ' · reminder' : ''} · ` : ''}${active ? `${done}/${items.length} done` : 'not today'}</div></div><div class="row" style="gap:6px">${complete ? '<span class="badge good">Done</span>' : ''}<button class="icon-btn" data-act="routine-edit" data-id="${r.id}" aria-label="Edit">${icon('pen')}</button></div></div>
+    ${complete ? '' : `<div class="list" style="margin-top:4px">${items.map(i => `<div class="li ${i.done ? 'done' : ''}">${active ? `<button class="check ${i.done ? 'on' : ''}" data-act="check-toggle" data-r="${r.id}" data-i="${i.id}">${icon('check')}</button>` : `<span class="check" style="opacity:.4"></span>`}<div class="main"><div class="t">${esc(i.text)}</div></div></div>`).join('') || '<div class="empty small">No steps.</div>'}</div>`}</div>`;
   }
   return html;
 }
@@ -138,14 +141,14 @@ export async function classesFor(date) {
 async function renderTimetable() {
   const all = await db.all('timetable');
   const s = await core.getSettings();
-  let html = `<button class="btn primary block" data-act="class-edit">${icon('plus')} Add class</button>`;
-  if (core.holidayActive(s, core.today())) html += `<div class="notice" style="margin-top:12px">Holiday mode is on until ${core.prettyDate(s.holidayUntil, { day: 'numeric', month: 'short' })} — classes are hidden from Today.</div>`;
+  let html = '';
+  if (core.holidayActive(s, core.today())) html += `<div class="notice" style="margin-bottom:12px">Holiday mode is on until ${core.prettyDate(s.holidayUntil, { day: 'numeric', month: 'short' })} — classes are hidden from Today.</div>`;
   for (const d of [1, 2, 3, 4, 5, 6, 0]) {
     const list = all.filter(c => (c.days || []).includes(d)).sort((a, b) => a.start.localeCompare(b.start));
     if (!list.length) continue;
-    html += `<div class="section-label">${core.DAY_SHORT[d]}</div><div class="card agenda" style="padding:4px 14px"><div class="list">${list.map(c => `<div class="li tap" data-act="class-edit" data-id="${c.id}"><span class="time">${c.start}</span><div class="main"><div class="t">${esc(c.subject)}</div><div class="s">${c.start}–${c.end}${c.room ? ' · ' + esc(c.room) : ''}</div></div></div>`).join('')}</div></div>`;
+    html += `<div class="section-label">${core.DAY_SHORT[d]}</div><div class="card agenda flush"><div class="list">${list.map(c => `<div class="li tap" data-act="class-edit" data-id="${c.id}"><span class="time">${c.start}</span><div class="main"><div class="t">${esc(c.subject)}</div><div class="s">${c.start}–${c.end}${c.room ? ' · ' + esc(c.room) : ''}</div></div></div>`).join('')}</div></div>`;
   }
-  if (!all.length) html += `<div class="card empty" style="margin-top:12px"><b>No timetable yet</b>Add your classes; they appear in Today's schedule on the right days.</div>`;
+  if (!all.length) html += `<div class="card empty"><b>No timetable yet</b>Tap + to add your classes; they appear on Home on the right days.</div>`;
   return html;
 }
 async function classEditor(id) {
@@ -176,14 +179,13 @@ async function renderMeals() {
   const recipes = await db.all('recipes');
   const byId = new Map(recipes.map(r => [r.id, r]));
   let html = `<div class="date-nav"><button class="icon-btn" data-act="plan-week" data-v="-7">${icon('chevL')}</button><span class="lbl">Week of ${core.prettyDate(start, { day: 'numeric', month: 'short' })}</span><button class="icon-btn" data-act="plan-week" data-v="7">${icon('chevR')}</button></div>
-  <div class="grid2" style="margin-bottom:12px"><button class="btn primary" data-act="plan-fill">${icon('sparkle')} Fill empty slots</button><button class="btn" data-act="plan-clear">Clear week</button></div>`;
+  <div class="row" style="gap:8px;margin-bottom:4px"><button class="btn sm primary grow" data-act="plan-fill">${icon('sparkle')} Fill empty slots</button><button class="btn sm" data-act="plan-clear">Clear week</button></div>`;
   if (recipes.length < 3) html += `<div class="notice warn" style="margin-bottom:12px">The planner uses your recipe library (favourites and higher-rated recipes come up more, with no repeats within 3 days). Add a few recipes first — or <button class="link" data-act="plan-gen">generate some</button>.</div>`;
   for (const d of days) {
-    const items = PLAN_SLOTS.map(slot => ({ slot, p: plan.find(x => x.date === d && x.slot === slot) }));
+    const items = PLAN_SLOTS.map(slot => ({ slot, p: plan.find(x => x.date === d && x.slot === slot) })).filter(x => x.slot !== 'snack' || x.p);
     const planned = items.filter(x => x.p && byId.get(x.p.recipeId)).map(x => byId.get(x.p.recipeId));
     const totals = N.sumNutrients(planned.map(r => r.perServing || N.recipeNutrition(r).perServing)).totals;
-    html += `<div class="section-label row between"><span>${core.relDay(d)}${planned.length ? ` · <span class="num">${Math.round(totals.kcal || 0)}</span> kcal · <span class="num">${Math.round(totals.protein || 0)}</span> g protein` : ''}</span><button class="link" data-act="plan-day" data-date="${d}">Regenerate</button></div>
-    <div class="card" style="padding:10px"><div class="fields" style="gap:6px">${items.map(({ slot, p }) => {
+    html += `<div class="card" style="padding:12px;margin-top:12px"><div class="row between" style="margin:0 4px 8px"><div><div class="h3">${core.relDay(d)}</div>${planned.length ? `<div class="tiny muted"><span class="num">${Math.round(totals.kcal || 0)}</span> kcal · <span class="num">${Math.round(totals.protein || 0)}</span> g protein</div>` : ''}</div><button class="icon-btn" data-act="plan-day" data-date="${d}" aria-label="Regenerate day">${icon('repeat')}</button></div><div class="fields" style="gap:6px">${items.map(({ slot, p }) => {
       const r = p && byId.get(p.recipeId);
       return `<button class="plan-cell ${r ? 'set' : ''}" data-act="plan-cell" data-date="${d}" data-slot="${slot}"><span class="tiny muted" style="width:62px;text-transform:capitalize">${slot}</span>${r ? `${r.photo ? `<img class="thumb" style="width:28px;height:28px;border-radius:8px" src="${r.photo}" alt="">` : ''}<span class="grow ellipsis bold">${esc(r.name)}</span>` : '<span class="muted">—</span>'}</button>`;
     }).join('')}</div>${planned.length ? `<details style="margin-top:10px"><summary class="link small">vs targets</summary><div style="margin-top:10px">${targetBars(totals, s.targets)}</div></details>` : ''}</div>`;
@@ -242,10 +244,7 @@ async function fill(days, slots = PLAN_SLOTS, { replace = false } = {}) {
 
 // ---------------- actions ----------------
 register({
-  'planner-sub': el => {
-    state.sub.planner = el.dataset.v;
-    rerender();
-  },
+  'planner-sub': el => setSub('planner', el.dataset.v),
   'task-edit': el => taskEditor(el.dataset.id),
   'task-toggle': async el => {
     const t = await db.get('tasks', el.dataset.id);

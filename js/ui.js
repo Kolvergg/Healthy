@@ -35,6 +35,16 @@ const P = {
   label: '<rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h5"/>',
   scale: '<path d="M5 20h14l-1.5-12h-11Z"/><circle cx="12" cy="5" r="2"/>',
   note: '<path d="M6 3.5h9l4 4V20a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 20Z"/><path d="M9 11h6M9 15h6"/>',
+  more: '<circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/>',
+  trend: '<path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/>',
+  list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/>',
+  repeat: '<path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11V9.5A3.5 3.5 0 0 1 7 6h13.5M7 21.5 3.5 18 7 14.5"/><path d="M20.5 13v1.5A3.5 3.5 0 0 1 17 18H3.5"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  grid: '<rect x="4" y="4" width="7" height="7" rx="2"/><rect x="13" y="4" width="7" height="7" rx="2"/><rect x="4" y="13" width="7" height="7" rx="2"/><rect x="13" y="13" width="7" height="7" rx="2"/>',
+  fork: '<path d="M7 3v8a2 2 0 0 0 2 2v8M5 3v5M9 3v5M17 21V3c-2.2 0-3.5 2.5-3.5 6v4H17"/>',
+  user: '<circle cx="12" cy="8.5" r="3.8"/><path d="M4.5 20.5c1.2-3.6 4-5.2 7.5-5.2s6.3 1.6 7.5 5.2"/>',
+  smile: '<circle cx="12" cy="12" r="8.5"/><path d="M8.5 14.5c.9 1.2 2.1 1.8 3.5 1.8s2.6-.6 3.5-1.8M9 9.5h.01M15 9.5h.01"/>',
+  checklist: '<path d="m4 7 1.5 1.5L8.5 5.5M4 15l1.5 1.5 3-3M11.5 7H20M11.5 15H20"/>',
 };
 export function icon(name, cls = '') {
   return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
@@ -71,6 +81,7 @@ export function sheet({ title = '', body = '', foot = null, onMount, onClose, wi
   el.setAttribute('aria-modal', 'true');
   if (wide) el.style.maxWidth = '820px';
   el.innerHTML = `<div class="grab"></div><header class="sheet-head"><div class="h2">${title}</div><button class="icon-btn" data-close aria-label="Close">${icon('x')}</button></header><div class="sheet-body"></div>${foot !== null ? `<footer class="sheet-foot"></footer>` : ''}`;
+  let closed = false;
   const api = {
     el,
     body: el.querySelector('.sheet-body'),
@@ -87,14 +98,17 @@ export function sheet({ title = '', body = '', foot = null, onMount, onClose, wi
       api.foot.style.display = h ? '' : 'none';
     },
     close() {
-      el.classList.remove('on');
+      if (closed) return;
+      closed = true;
+      el.classList.remove('on', 'drag');
+      el.style.transform = '';
       back.classList.remove('on');
       const i = stack.indexOf(api);
       if (i >= 0) stack.splice(i, 1);
       setTimeout(() => {
         el.remove();
         back.remove();
-      }, 300);
+      }, 420);
       onClose && onClose();
     },
   };
@@ -103,22 +117,40 @@ export function sheet({ title = '', body = '', foot = null, onMount, onClose, wi
   if (api.foot && !foot) api.foot.style.display = 'none';
   back.onclick = () => api.close();
   el.querySelector('[data-close]').onclick = () => api.close();
-  // swipe down on the grab/header to close
+  // Drag down to dismiss: from the handle/header, or from the content when it's scrolled to the top.
   let y0 = null;
-  const head = el.querySelector('.sheet-head');
-  [el.querySelector('.grab'), head].forEach(h => {
-    h.addEventListener('touchstart', e => (y0 = e.touches[0].clientY), { passive: true });
-    h.addEventListener('touchmove', e => {
-      if (y0 == null) return;
-      const dy = e.touches[0].clientY - y0;
-      if (dy > 0) el.style.transform = `translateY(${dy}px)`;
-    }, { passive: true });
-    h.addEventListener('touchend', e => {
-      const dy = (e.changedTouches[0].clientY || 0) - (y0 || 0);
+  let t0 = 0;
+  let dy = 0;
+  el.addEventListener('touchstart', e => {
+    const inBody = api.body.contains(e.target);
+    if (inBody && api.body.scrollTop > 0) return;
+    if (e.target.closest('input, textarea, select, .chart')) return;
+    y0 = e.touches[0].clientY;
+    t0 = Date.now();
+    dy = 0;
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    if (y0 == null) return;
+    dy = e.touches[0].clientY - y0;
+    if (dy <= 0) {
+      if (dy < -6) y0 = null;
+      el.classList.remove('drag');
       el.style.transform = '';
-      y0 = null;
-      if (dy > 90) api.close();
-    });
+      return;
+    }
+    if (api.body.scrollTop > 0) return;
+    el.classList.add('drag');
+    el.style.transform = `translateY(${dy}px)`;
+    back.style.opacity = String(Math.max(0.2, 1 - dy / 500));
+  }, { passive: true });
+  el.addEventListener('touchend', () => {
+    if (y0 == null) return;
+    const v = dy / Math.max(1, Date.now() - t0);
+    el.classList.remove('drag');
+    back.style.opacity = '';
+    y0 = null;
+    if (dy > 120 || (dy > 40 && v > 0.6)) api.close();
+    else el.style.transform = '';
   });
   document.body.append(back, el);
   stack.push(api);
@@ -129,6 +161,121 @@ export function sheet({ title = '', body = '', foot = null, onMount, onClose, wi
   onMount && onMount(api);
   return api;
 }
+/** A sheet whose body re-renders (smoothly, via morph) whenever data changes. */
+const live = new Set();
+export function liveSheet({ title, render, foot = null, onClose } = {}) {
+  const s = sheet({ title, body: `<div class="loading-block"><span class="spinner"></span></div>`, foot, onClose: () => {
+    live.delete(s);
+    onClose && onClose();
+  } });
+  s.refresh = async () => morph(s.body, await render(s));
+  live.add(s);
+  render(s).then(h => (s.body.innerHTML = h));
+  return s;
+}
+export function refreshLiveSheets() {
+  for (const s of live) s.refresh().catch(() => {});
+}
+
+// ---------------- DOM morphing: update the page in place so nothing flickers ----------------
+function sameNode(a, b) {
+  if (a.nodeType !== b.nodeType) return false;
+  if (a.nodeType !== 1) return true;
+  if (a.tagName !== b.tagName) return false;
+  const ka = a.getAttribute('data-key');
+  const kb = b.getAttribute('data-key');
+  if (ka || kb) return ka === kb;
+  if (a.tagName === 'INPUT' && (a.getAttribute('type') || 'text') !== (b.getAttribute('type') || 'text')) return false;
+  return true;
+}
+function patchAttrs(a, b) {
+  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name) && !(name === 'open' && a.tagName === 'DETAILS')) a.removeAttribute(name);
+  for (const { name, value } of [...b.attributes]) {
+    const old = a.getAttribute(name);
+    if (old === value) continue;
+    a.setAttribute(name, value);
+    if (name === 'value' && (a.tagName === 'INPUT' || a.tagName === 'SELECT') && a.type !== 'file' && a !== document.activeElement) a.value = value;
+    if (name === 'checked' && a.tagName === 'INPUT') a.checked = true;
+  }
+  if (a.tagName === 'INPUT' && a.hasAttribute('checked') !== b.hasAttribute('checked')) a.checked = b.hasAttribute('checked');
+}
+function patchNode(a, b) {
+  if (a.nodeType !== 1) {
+    if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue;
+    return;
+  }
+  const hadChecked = a.tagName === 'INPUT' && a.hasAttribute('checked');
+  patchAttrs(a, b);
+  if (a.tagName === 'INPUT' && hadChecked !== b.hasAttribute('checked')) a.checked = b.hasAttribute('checked');
+  if (a.tagName === 'TEXTAREA') {
+    if (a.defaultValue !== b.defaultValue && a !== document.activeElement) {
+      a.defaultValue = b.defaultValue;
+      a.value = b.defaultValue;
+    }
+    return;
+  }
+  patchChildren(a, b);
+  if (a.tagName === 'SELECT' && a !== document.activeElement) {
+    const sel = b.querySelector('option[selected]');
+    if (sel) a.value = sel.value;
+  }
+}
+function patchChildren(parent, next) {
+  let a = parent.firstChild;
+  let b = next.firstChild;
+  while (b) {
+    const nb = b.nextSibling;
+    if (!a) {
+      parent.appendChild(b);
+    } else if (sameNode(a, b)) {
+      patchNode(a, b);
+      a = a.nextSibling;
+    } else {
+      const na = a.nextSibling;
+      parent.replaceChild(b, a);
+      a = na;
+    }
+    b = nb;
+  }
+  while (a) {
+    const na = a.nextSibling;
+    parent.removeChild(a);
+    a = na;
+  }
+}
+export function morph(el, html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  patchChildren(el, tpl.content);
+}
+
+// ---------------- page header & week strip ----------------
+/** Large-title header with glass buttons. `back` shows a back chevron. */
+export function pageHead({ title, sub = '', back = false, actions = '', center = false }) {
+  return `<header class="ph ${center ? 'center' : ''}"><div class="ph-bar">${back ? `<button class="glass-btn" data-act="back" aria-label="Back">${icon('chevL')}</button>` : ''}<div class="ph-actions">${actions}</div></div><h1 class="ph-title" data-title="${esc(title)}">${esc(title)}</h1>${sub ? `<div class="ph-sub">${sub}</div>` : ''}</header>`;
+}
+export const glassBtn = (act, ic, label, extra = '') => `<button class="glass-btn" data-act="${act}" aria-label="${esc(label)}" ${extra}>${icon(ic)}</button>`;
+
+/**
+ * Mon–Sun strip for the week containing `date`. marks: { 'YYYY-MM-DD': 'full'|'part'|'' }.
+ * Tapping a day fires `act` with data-date.
+ */
+export function weekStrip(date, { act = 'date-pick', marks = null, todayYmd, addDays, parseYmd } = {}) {
+  const d0 = parseYmd(date);
+  const wd = d0.getDay();
+  const start = addDays(date, wd === 0 ? -6 : 1 - wd);
+  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
+  const L = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  const label = parseYmd(start).toLocaleDateString('en-AU', { month: 'long', year: 'numeric' });
+  return `<div class="wk-head"><button class="icon-btn" data-act="${act}" data-date="${addDays(date, -7)}" aria-label="Previous week">${icon('chevL')}</button><span class="lbl">${label}</span><button class="icon-btn" data-act="${act}" data-date="${addDays(date, 7)}" aria-label="Next week">${icon('chevR')}</button></div><div class="wk">${days
+    .map(d => {
+      const p = parseYmd(d);
+      const cls = [d === date ? 'sel' : '', d === todayYmd ? 'today' : '', d > todayYmd ? 'future' : ''].join(' ');
+      return `<button class="${cls}" data-act="${act}" data-date="${d}"><span class="l">${L[p.getDay()]}</span><span class="n">${p.getDate()}</span>${marks ? `<span class="m ${marks[d] || ''}"></span>` : ''}</button>`;
+    })
+    .join('')}</div>`;
+}
+
 export function topSheet() {
   return stack[stack.length - 1];
 }
@@ -181,7 +328,7 @@ export function ring(pct, { size = 120, stroke = 11, color = 'var(--accent)', in
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const p = Math.max(0, Math.min(1, pct || 0));
-  return `<div class="ring" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}"><circle class="ring-bg" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="${stroke}"/><circle class="ring-fg" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - p)}" ${p === 0 ? 'stroke-opacity="0"' : ''}/></svg><div class="ring-in">${inner}</div></div>`;
+  return `<div class="ring" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}"><circle class="ring-bg" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="${stroke}"/><circle class="ring-fg" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}" stroke-dasharray="${c.toFixed(2)}" style="--c:${c.toFixed(2)};stroke-dashoffset:${(c * (1 - p)).toFixed(2)};stroke-opacity:${p === 0 ? 0 : 1}"/></svg><div class="ring-in">${inner}</div></div>`;
 }
 export function bar(pct, color, { limit = false } = {}) {
   const w = Math.max(0, Math.min(1, pct || 0)) * (limit ? 100 / 1.25 : 100);
@@ -189,13 +336,11 @@ export function bar(pct, color, { limit = false } = {}) {
 }
 
 // ---------------- charts (single-series, one axis, tap/hover tooltips) ----------------
-let chartId = 0;
 /**
  * points: [{ label, value, tip }] in order. kind: 'line' | 'bar'.
  * target: optional dashed reference line.
  */
 export function chart(points, { kind = 'bar', color = 'var(--accent)', height = 150, target = null, unit = '', fmt = v => Math.round(v).toLocaleString('en-AU'), yMin = 0, domain = null } = {}) {
-  const id = 'ch' + ++chartId;
   const vals = points.map(p => p.value).filter(v => v != null && Number.isFinite(v));
   if (!vals.length) return `<div class="empty small">No data in this period yet.</div>`;
   const W = 340;
@@ -252,34 +397,31 @@ export function chart(points, { kind = 'bar', color = 'var(--accent)', height = 
   points.forEach((p, i) => {
     const cx = kind === 'bar' ? xb(i) : x(i);
     const w = (W - L - R) / points.length;
-    svg += `<rect class="hit" data-i="${i}" x="${cx - w / 2}" y="0" width="${w}" height="${H}"/>`;
+    const tip = p.value == null ? `${p.label}: no data` : p.tip || `${p.label}: ${fmt(p.value)}${unit ? ' ' + unit : ''}`;
+    svg += `<rect class="hit" data-tip="${esc(tip)}" data-x="${cx.toFixed(1)}" data-y="${(p.value == null ? 20 : y(p.value)).toFixed(1)}" x="${cx - w / 2}" y="0" width="${w}" height="${H}"/>`;
   });
   svg += '</svg>';
-  const tips = points.map(p => (p.value == null ? `${p.label}: no data` : p.tip || `${p.label}: ${fmt(p.value)}${unit ? ' ' + unit : ''}`));
-  setTimeout(() => wireChart(id, tips, points, kind, x, xb, y, W), 0);
-  return `<div class="chart" id="${id}">${svg}<div class="tip"></div></div>`;
+  return `<div class="chart" data-w="${W}">${svg}<div class="tip"></div></div>`;
 }
-function wireChart(id, tips, points, kind, x, xb, y, W) {
-  const el = document.getElementById(id);
-  if (!el) return;
+function showTip(hit) {
+  const el = hit.closest('.chart');
+  const svg = el.querySelector('svg');
   const tip = el.querySelector('.tip');
-  const show = i => {
-    const p = points[i];
-    const svg = el.querySelector('svg');
-    const sx = svg.clientWidth / W;
-    const cx = (kind === 'bar' ? xb(i) : x(i)) * sx;
-    const cy = (p.value == null ? 20 : y(p.value)) * sx;
-    tip.textContent = tips[i];
-    tip.style.left = Math.max(50, Math.min(svg.clientWidth - 50, cx)) + 'px';
-    tip.style.top = cy + 'px';
-    tip.classList.add('on');
-  };
-  el.querySelectorAll('.hit').forEach(r => {
-    r.addEventListener('pointerenter', () => show(+r.dataset.i));
-    r.addEventListener('pointerdown', () => show(+r.dataset.i));
-  });
-  el.addEventListener('pointerleave', () => tip.classList.remove('on'));
+  const sx = svg.clientWidth / Number(el.dataset.w);
+  tip.textContent = hit.dataset.tip;
+  tip.style.left = Math.max(50, Math.min(svg.clientWidth - 50, Number(hit.dataset.x) * sx)) + 'px';
+  tip.style.top = Number(hit.dataset.y) * sx + 'px';
+  tip.classList.add('on');
 }
+document.addEventListener('pointerover', e => e.target.classList && e.target.classList.contains('hit') && showTip(e.target));
+document.addEventListener('pointerdown', e => {
+  if (e.target.classList && e.target.classList.contains('hit')) showTip(e.target);
+  else document.querySelectorAll('.chart .tip.on').forEach(t => t.classList.remove('on'));
+});
+document.addEventListener('pointerout', e => {
+  const c = e.target.closest && e.target.closest('.chart');
+  if (c && !c.contains(e.relatedTarget)) c.querySelector('.tip').classList.remove('on');
+});
 
 // ---------------- images ----------------
 export function fileToImage(file) {

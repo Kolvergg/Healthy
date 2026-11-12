@@ -36,13 +36,55 @@ export async function call(path, { method = 'GET', body, raw = false, timeout = 
 }
 
 export async function ai(task, payload = {}) {
-  if (await configured()) return call('/api/ai', { method: 'POST', body: { task, ...payload }, timeout: 90000 });
   const s = await core.getSettings();
-  if (!s.geminiKey) throw new Error('Add your Gemini API key in Settings → Connection.');
-  // Direct mode: same prompts as the Worker, run in the browser with the key stored on this device.
-  const worker = (await import('../worker/worker.js')).default;
-  const r = await worker._test.aiTask({ GEMINI_API_KEY: s.geminiKey, GEMINI_MODEL: s.geminiModel || '' }, { task, ...payload });
-  return { ok: true, model: r.model, source: r.source || null, data: r.data };
+  const body = { task, ...payload, accurate: task === 'photo' && s.aiAccurate ? true : undefined };
+  let r;
+  // Until the Worker is updated to v2 (cheap models), use the key on this phone if there is one.
+  const viaWorker = (await configured()) && (!s.geminiKey || (await workerVersion()) >= 2);
+  if (viaWorker) {
+    try {
+      r = await call('/api/ai', { method: 'POST', body, timeout: 90000 });
+    } catch (e) {
+      // An old Worker, or a Worker without the key: fall back to the key on this phone if there is one.
+      if (!s.geminiKey || !/GEMINI_API_KEY|Unknown AI task|not found/i.test(e.message)) throw e;
+    }
+  }
+  if (!r) {
+    if (!s.geminiKey) throw new Error('Add your Gemini API key in Settings → Connection.');
+    // Direct mode: same prompts and cost limits as the Worker, run with the key stored on this device.
+    const worker = (await import('../worker/worker.js')).default;
+    const x = await worker._test.aiTask({ GEMINI_API_KEY: s.geminiKey }, body);
+    r = { ok: true, model: x.model, source: x.source || null, data: x.data, usage: x.usage };
+  }
+  trackUsage(r);
+  return r;
+}
+/** Worker code version (cached 12 h). 1 = original, 2 = cheap AI + reminder status. */
+export async function workerVersion(fresh = false) {
+  const c = await db.kvGet('cache:workerVersion', null);
+  if (!fresh && c && Date.now() - c.at < 12 * 3600 * 1000) return c.v;
+  try {
+    const p = await call('/api/ping', { timeout: 8000 });
+    const v = p.version || 1;
+    await db.kvSet('cache:workerVersion', { v, at: Date.now() }, { silent: true });
+    return v;
+  } catch {
+    return c ? c.v : 1;
+  }
+}
+async function trackUsage(r) {
+  try {
+    const month = core.today().slice(0, 7);
+    const u = (await db.kvGet('aiUsage', null)) || {};
+    const m = u.month === month ? u : { month, calls: 0, in: 0, out: 0, models: {} };
+    m.calls++;
+    if (r.usage) {
+      m.in += r.usage.in || 0;
+      m.out += (r.usage.out || 0) + (r.usage.think || 0);
+    }
+    if (r.model) m.models[r.model] = (m.models[r.model] || 0) + 1;
+    await db.kvSet('aiUsage', m, { silent: true });
+  } catch {}
 }
 
 // ---------------- push ----------------
@@ -87,7 +129,7 @@ export async function enablePush() {
   }
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8Array(publicKey) });
   await call('/api/subscribe', { method: 'POST', body: { subscription: sub.toJSON(), label: navigator.userAgent.slice(0, 80) } });
-  await syncConfig(true);
+  await syncConfig(true, true);
   return sub;
 }
 export async function disablePush() {
@@ -151,13 +193,30 @@ export async function buildConfig() {
 }
 
 let cfgTimer = null;
-export async function syncConfig(now = false) {
+const hash = str => {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return String(h);
+};
+/**
+ * Sends the reminder schedule to the Worker. Skips the upload when nothing changed and the
+ * last sync is recent (keeps Cloudflare KV writes low); `force` always uploads.
+ */
+export async function syncConfig(now = false, force = false) {
   if (!(await configured())) return;
   clearTimeout(cfgTimer);
   const run = async () => {
     try {
-      await call('/api/config', { method: 'POST', body: await buildConfig() });
+      const cfg = await buildConfig();
+      const { updatedAt, ...rest } = cfg;
+      const h = hash(JSON.stringify(rest));
+      const prevH = await db.kvGet('cache:configHash', null);
+      const at = await db.kvGet('cache:configSyncedAt', 0);
+      if (!force && h === prevH && Date.now() - (at || 0) < 6 * 3600 * 1000) return;
+      await call('/api/config', { method: 'POST', body: cfg });
+      await db.kvSet('cache:configHash', h, { silent: true });
       await db.kvSet('cache:configSyncedAt', Date.now(), { silent: true });
+      await db.kvSet('cache:configSyncError', null, { silent: true });
     } catch (e) {
       await db.kvSet('cache:configSyncError', String(e.message), { silent: true });
     }
@@ -180,6 +239,9 @@ export async function syncDay(date = core.today()) {
   }, 800);
 }
 
+export async function status() {
+  return call('/api/status');
+}
 export async function snooze(minutes, title, body, url = './') {
   return call('/api/snooze', { method: 'POST', body: { minutes, title, body, url } });
 }

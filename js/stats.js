@@ -2,7 +2,7 @@
 import * as db from './db.js';
 import * as core from './core.js';
 import * as N from './nutrition.js';
-import { chart, esc } from './ui.js';
+import { chart, esc, pageHead } from './ui.js';
 import { state, register, rerender } from './state.js';
 import { nutColor } from './food.js';
 
@@ -71,17 +71,22 @@ export async function render() {
   const weeks = n / 7;
   const range = `<div class="seg-wrap"><div class="seg">${[7, 30, 90].map(v => `<button class="${n === v ? 'on' : ''}" data-act="stats-range" data-v="${v}">${v === 7 ? 'Week' : v === 30 ? 'Month' : '90 days'}</button>`).join('')}</div></div>`;
   const tile = (k, v, d, sub) => `<div class="stat"><div class="k">${k}</div><div class="v num">${v}</div><div class="d">${sub || ''}</div>${d ? `<div class="tiny muted" style="margin-top:2px">${d}</div>` : ''}</div>`;
-  let html = `<div class="page-head"><div class="eyebrow">Statistics</div><h1 class="title">Trends</h1></div>${range}
-  <div class="grid2">
+  const view = state.statsView || 'overview';
+  const views = `<div class="chips" style="margin-bottom:12px">${[['overview', 'Overview'], ['nutrition', 'Nutrition'], ['body', 'Body & habits']].map(([k, l]) => `<button class="chip ${view === k ? 'on' : ''}" data-act="stats-view" data-v="${k}">${l}</button>`).join('')}</div>`;
+  let html = `${pageHead({ title: 'Trends', back: true })}${range}${views}`;
+  if (view === 'overview') html += `
+  <div class="card"><div class="grid2">
     ${tile('Priority score', A.score == null ? '—' : Math.round(A.score), delta(A.score, B.score), `avg of ${A.loggedDays} logged days`)}
     ${tile('Medication', pctTxt(A.adherence), A.adherence != null && B.adherence != null ? delta(A.adherence * 100, B.adherence * 100, 0, ' pts') : '', 'doses taken')}
     ${tile('Water', A.water == null ? '—' : (A.water / 1000).toFixed(2) + ' L', delta(A.water / 1000, B.water / 1000, 2, ' L'), `target hit ${pctTxt(A.waterHit)} of days`)}
     ${tile('Sleep', A.sleep == null ? '—' : A.sleep.toFixed(1) + ' h', delta(A.sleep, B.sleep, 1, ' h'), A.bedSd == null ? 'bedtime spread —' : `bedtime ±${Math.round(A.bedSd)} min`)}
     ${tile('Workouts', (A.workouts / weeks).toFixed(1), delta(A.workouts / weeks, B.workouts / weeks, 1), 'per week')}
     ${tile('Habits', pctTxt(A.habits), A.habits != null && B.habits != null ? delta(A.habits * 100, B.habits * 100, 0, ' pts') : '', 'routine steps done')}
-  </div>`;
+  </div></div>`;
 
-  html += `<div class="section-label">Nutrition averages · ${A.loggedDays} logged day${A.loggedDays === 1 ? '' : 's'}</div><div class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Nutrient</th><th class="n">Avg/day</th><th class="n">Target</th><th class="n">Days on target</th></tr></thead><tbody>${s.targets
+  if (view === 'overview') return html + `<p class="tiny muted center" style="margin-top:14px">${esc(`Comparing ${core.prettyDate(ds[0], { day: 'numeric', month: 'short' })} – today with the ${n} days before.`)}</p>`;
+  if (view === 'nutrition') {
+  html += `<div class="section-label" style="margin-top:8px">Averages · ${A.loggedDays} logged day${A.loggedDays === 1 ? '' : 's'}</div><div class="card"><div class="table-wrap"><table class="t"><thead><tr><th>Nutrient</th><th class="n">Avg/day</th><th class="n">Target</th><th class="n">Days on target</th></tr></thead><tbody>${s.targets
     .map(t => {
       const nn = N.NUTRIENT[t.key];
       const ok = A.perDay.filter(p => p.tot && p.tot[t.key] != null && (t.kind === 'min' ? p.tot[t.key] >= t.value : p.tot[t.key] <= t.value)).length;
@@ -94,7 +99,9 @@ export async function render() {
     html += `<div class="card"><div class="card-head"><div class="h3">${nn.label}</div><span class="small muted">${nn.unit}/day · dashed = ${t.kind === 'min' ? 'target' : 'limit'}</span></div>${chart(A.perDay.map(p => ({ label: lbl(p.d, n), value: p.tot ? p.tot[t.key] : null, tip: `${core.relDay(p.d)}: ${p.tot ? N.fmt(t.key, p.tot[t.key]) + ' ' + nn.unit : 'not logged'}` })), { kind: n > 31 ? 'line' : 'bar', color: nutColor(t.key), target: t.value, unit: nn.unit })}</div>`;
   }
 
-  html += `<div class="section-label">Body & routine</div>`;
+  return html;
+  }
+
   html += `<div class="card"><div class="card-head"><div class="h3">Water</div><span class="small muted">ml/day</span></div>${chart(A.perDay.map(p => ({ label: lbl(p.d, n), value: p.water })), { kind: n > 31 ? 'line' : 'bar', color: 'var(--water)', target: s.water.target, unit: 'ml' })}</div>`;
   html += `<div class="card"><div class="card-head"><div class="h3">Sleep</div><span class="small muted">hours</span></div>${chart(A.perDay.map(p => ({ label: lbl(p.d, n), value: p.hours, tip: p.hours == null ? `${core.relDay(p.d)}: not logged` : `${core.relDay(p.d)}: ${p.hours.toFixed(1)} h` })), { kind: n > 31 ? 'line' : 'bar', color: 'var(--sleep)', fmt: v => v.toFixed(0) })}</div>`;
   html += `<div class="card"><div class="card-head"><div class="h3">Medication adherence</div><span class="small muted">% of required doses</span></div>${chart(A.perDay.map(p => ({ label: lbl(p.d, n), value: p.req ? (p.taken / p.req) * 100 : null })), { kind: n > 31 ? 'line' : 'bar', color: 'var(--good)', unit: '%', fmt: v => Math.round(v) + '', domain: [0, 100] })}</div>`;
@@ -106,6 +113,10 @@ export async function render() {
 }
 
 register({
+  'stats-view': el => {
+    state.statsView = el.dataset.v;
+    rerender();
+  },
   'stats-range': el => {
     state.statsRange = Number(el.dataset.v);
     rerender();

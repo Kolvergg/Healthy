@@ -35,8 +35,8 @@ It has two parts:
      - `APP_TOKEN`, type **Secret**: a long random password (30+ characters). You'll type it into the app once.
      - `VAPID_SUBJECT`, type **Text**: `mailto:` followed by your email. Apple rejects pushes without a real contact.
      - `ALLOWED_ORIGIN`, type **Text**: `https://<your-username>.github.io`
-     - optional `GEMINI_MODEL`, type **Text**: e.g. `gemini-3.7-flash`. By default it tries `gemini-flash-latest` and then falls back.
-   - **Triggers → Cron Triggers → Add**: `* * * * *` (every minute).
+     - optional `GEMINI_TEXT_MODEL` / `GEMINI_VISION_MODEL`, type **Text**: override the model. Leave unset — the default is the cheapest one (`gemini-3.1-flash-lite`, falling back to `gemini-3.5-flash-lite`).
+   - **Settings → Trigger events (Triggers) → Add → Cron Triggers → Every minute** (`* * * * *`). **Without this, test notifications work but no scheduled reminder ever fires** — the Worker only wakes up on schedule because of this trigger. Settings → Reminders in the app shows "Reminder engine running" once it's working.
 6. Copy the Worker URL, e.g. `https://healthos.<you>.workers.dev`. Opening it in a browser should show `{"app":"HealthOS worker","ok":true}`.
 
 ## 3. Install on your iPhone (5 min)
@@ -59,13 +59,15 @@ It has two parts:
 - [ ] Check **Settings → Notifications → Notification history** shows "Sent".
 - [ ] Check Focus modes / Sleep Focus don't silence HealthOS (iOS Settings → Focus → allowed apps).
 
-If nothing arrives: check `VAPID_SUBJECT` is set, the cron trigger exists, and the app was opened from the Home Screen icon when you enabled notifications.
+If nothing arrives: open **Settings** in the app. The Reminders card tells you which part is broken (engine not running = no cron trigger; schedule not synced; notifications off on this phone) and lists the next reminders the Worker will send. **Test in 2 min** sends a reminder through the same scheduled path as real ones — if that arrives with the phone locked, scheduled reminders work.
 
-## 5. Apple Health (optional, via an iOS Shortcut)
+## 5. Apple Health (optional)
 
-Apple only lets native apps read HealthKit, so no web page can. The workaround: a Shortcut reads Health once a day and sends the numbers to your Worker. HealthOS pulls them in and labels them **Apple Health**, separate from what you typed.
+Apple only lets native App Store apps read HealthKit, so no web page can. Two workarounds, both sending numbers to your Worker; HealthOS pulls them in and labels them **Apple Health**, separate from what you typed.
 
-In **Shortcuts → Automation → + → Time of Day** (e.g. 9:00 am, Daily, **Run Immediately**), build:
+**Option A — Health Auto Export (automatic, recommended).** Install *Health Auto Export – JSON+CSV* (automations need its Premium). Automations → New → **REST API**; URL `https://healthos.<you>.workers.dev/api/healthkit`; header `Authorization` = `Bearer <APP_TOKEN>`; Health Metrics: Step Count, Active Energy, Apple Exercise Time, Resting Heart Rate, Heart Rate, Weight & Body Mass, Sleep Analysis; Format **JSON**; Aggregation **Day**; range **Since last sync**. The Worker understands this format directly.
+
+**Option B — free iOS Shortcut.** In **Shortcuts → Automation → + → Time of Day** (e.g. 9:00 am, Daily, **Run Immediately**), build:
 
 1. **Find Health Samples**: Type *Steps*, Start Date *is yesterday* → **Calculate Statistics** *Sum* → set variable `steps`.
 2. **Find Health Samples**: Type *Resting Heart Rate*, sort *Latest first*, limit 1 → set variable `rhr`.
@@ -91,11 +93,14 @@ Accepted fields: `steps, distance_km, exercise_min, active_kcal, resting_hr, avg
 - Reminders fire within about a minute of the set time and need the phone to have internet. iOS can delay web push in Low Power Mode.
 - For waking up, use the Clock app alarm. Web notifications can't play alarm sounds or break through Silent mode.
 - AI food *image generation* was left out on purpose: a generated photo of food that doesn't exist adds cost and no information. Recipes use your own photo, or the source's.
-- Cloudflare's free KV allows about 1,000 writes a day. Normal use is roughly 30–60.
+- Cloudflare's free KV allows about 1,000 writes a day. Normal use is roughly 200 (the reminder engine writes a heartbeat every 10 minutes so the app can show it's running).
+- AI cost: every request uses Gemini Flash-Lite with thinking set to minimal, a capped response length and medium image resolution. A typical meal photo is ~800 input + ~300 output tokens. **Settings → AI & usage** shows this month's requests and tokens; "Higher-accuracy photos" switches meal photos only to Gemini Flash.
 
 ## Updating the app
 
 Edit files on GitHub, **bump `VERSION` in `sw.js`**, and commit. Then in the app go to **Settings → About → Check for app update**.
+
+When `worker/worker.js` changes, the Worker on Cloudflare must be updated too: **Settings → Worker setup & update → Copy Worker code**, then Cloudflare → your worker → **Edit code** → select all → paste → **Deploy**. The app tells you when the Worker is out of date.
 
 ## Developing
 

@@ -4,8 +4,8 @@ import * as core from './core.js';
 import * as N from './nutrition.js';
 import * as api from './api.js';
 import { parseAfcd } from './afcd.js';
-import { esc, icon, sheet, toast, confirmSheet, promptSheet, compressImage, thumbFromDataUrl, bar, debounce, initials } from './ui.js';
-import { state, register, rerender } from './state.js';
+import { esc, icon, sheet, toast, confirmSheet, promptSheet, compressImage, thumbFromDataUrl, bar, debounce, initials, pageHead, glassBtn, weekStrip } from './ui.js';
+import { state, register, rerender, setSub } from './state.js';
 
 // ---------------- caches ----------------
 let foodsCache = null;
@@ -52,13 +52,16 @@ export function targetBars(totals, targets, missing = {}) {
 }
 
 // ---------------- Nutrition tab ----------------
+const FOOD_SUBS = [['diary', 'Diary'], ['recipes', 'Recipes'], ['plan', 'Meal plan'], ['foods', 'Foods']];
 export async function render() {
-  const sub = state.sub.nutrition;
-  const seg = `<div class="seg-wrap"><div class="seg">${['diary', 'recipes', 'foods'].map(k => `<button class="${sub === k ? 'on' : ''}" data-act="nut-sub" data-v="${k}">${{ diary: 'Diary', recipes: 'Recipes', foods: 'Foods' }[k]}</button>`).join('')}</div></div>`;
-  const head = `<div class="page-head"><div class="eyebrow">Nutrition</div><h1 class="title">${{ diary: 'Food diary', recipes: 'Recipes', foods: 'Food database' }[sub]}</h1></div>`;
+  const sub = FOOD_SUBS.some(x => x[0] === state.sub.nutrition) ? state.sub.nutrition : 'diary';
+  const seg = `<div class="seg-wrap"><div class="seg">${FOOD_SUBS.map(([k, l]) => `<button class="${sub === k ? 'on' : ''}" data-act="nut-sub" data-v="${k}">${l}</button>`).join('')}</div></div>`;
+  const actions = { diary: `<button class="glass-btn wide" data-act="log-open">${icon('camera')} Log</button>`, recipes: glassBtn('recipe-new', 'plus', 'New recipe'), plan: glassBtn('plan-gen', 'sparkle', 'Generate recipes'), foods: glassBtn('food-new', 'plus', 'New food') }[sub];
+  const head = pageHead({ title: 'Food', actions });
   let body = '';
   if (sub === 'diary') body = await renderDiary();
   else if (sub === 'recipes') body = await renderRecipes();
+  else if (sub === 'plan') body = await (await import('./planner.js')).renderMealPlan();
   else body = await renderFoods();
   return head + seg + body;
 }
@@ -70,18 +73,28 @@ async function renderDiary() {
   const d = N.dayTotals(entries);
   const score = N.priorityScore(d.totals, s.targets);
   const afcdCount = (await foods()).filter(f => f.source === 'afcd').length;
-  let html = `<div class="date-nav"><button class="icon-btn" data-act="date-shift" data-v="-1" aria-label="Previous day">${icon('chevL')}</button><label class="lbl" style="position:relative">${core.relDay(date)}<input type="date" value="${date}" data-chg="date-set" style="position:absolute;inset:0;opacity:0"></label><button class="icon-btn" data-act="date-shift" data-v="1" aria-label="Next day">${icon('chevR')}</button></div>`;
+  const wkStart = core.startOfWeek(date);
+  const wkEntries = await db.range('entries', wkStart, core.addDays(wkStart, 6));
+  const marks = {};
+  for (const e of wkEntries) marks[e.date] = 'part';
+  let html = weekStrip(date, { act: 'date-pick', marks, todayYmd: core.today(), addDays: core.addDays, parseYmd: core.parseYmd });
   if (!afcdCount) html += `<div class="notice warn" style="margin-bottom:12px"><b>Food database is empty.</b> Import the free AFCD data once so calculations use verified Australian values. <button class="link" data-act="afcd-import">Import AFCD →</button></div>`;
-  html += `<div class="card"><div class="row between"><div><div class="eyebrow">Energy</div><div class="big-num num">${f0(d.totals.kcal)}<span class="muted" style="font-size:16px;font-weight:600"> kcal</span></div></div>${score != null ? `<div class="center"><div class="eyebrow">Priority score</div><div class="num bold" style="font-size:26px">${score}</div></div>` : ''}</div>
+  html += `<div class="card"><div class="row between"><div><div class="eyebrow">${core.relDay(date)}</div><div class="big-num num">${f0(d.totals.kcal)}<span class="muted" style="font-size:16px;font-weight:600"> kcal</span></div></div>${score != null ? `<div class="center"><div class="eyebrow">Priority score</div><div class="num bold" style="font-size:26px">${score}</div></div>` : ''}</div>
   <div class="macro-strip" style="margin:14px 0 16px">${['protein', 'carbs', 'fat', 'fibre'].map(k => `<div class="stat"><div class="k">${N.NUTRIENT[k].label.replace('Carbohydrates', 'Carbs').replace('Total fat', 'Fat')}</div><div class="v num">${f1(d.totals[k])}<span class="muted" style="font-size:12px"> g</span></div></div>`).join('')}</div>
   ${targetBars(d.totals, s.targets, d.missing)}
   <details style="margin-top:14px"><summary class="link" style="list-style:none;cursor:pointer">All nutrients</summary><div class="kv" style="margin-top:10px">${N.NUTRIENTS.map(n => `<span>${n.label}</span><span>${N.fmt(n.key, d.totals[n.key])} ${d.totals[n.key] == null ? '' : n.unit}${d.missing[n.key] && d.totals[n.key] != null ? ' +?' : ''}</span>`).join('')}</div><p class="tiny muted">“+?” means some items had no value for that nutrient in the database, so the real total is higher.</p></details></div>`;
+  // One card for all meals: empty slots collapse to a single "+ add" row instead of a heading each.
+  html += `<div class="section-label">Meals</div><div class="card flush"><div class="list">`;
   for (const slot of core.DIARY_SLOTS) {
     const list = entries.filter(e => e.slot === slot.id).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
     const st = N.dayTotals(list).totals;
-    html += `<div class="section-label row between"><span>${slot.name}${list.length ? ` · <span class="num">${f0(st.kcal)}</span> kcal` : ''}</span><button class="icon-btn" data-act="log-open" data-slot="${slot.id}" aria-label="Add to ${slot.name}">${icon('plus')}</button></div>`;
-    if (list.length) html += `<div class="card" style="padding:4px 14px"><div class="list">${list.map(entryRow).join('')}</div></div>`;
+    const isSnack = slot.meal === 'snack';
+    if (!list.length && isSnack) continue;
+    html += `<div class="li tap" data-act="log-open" data-slot="${slot.id}"><div class="main"><div class="t">${slot.name}</div><div class="s">${list.length ? `${f0(st.kcal)} kcal · ${f1(st.protein)} g protein` : 'Nothing logged'}</div></div><span class="icon-btn">${icon('plus')}</span></div>${list.map(entryRow).join('')}`;
   }
+  const snacksEmpty = core.DIARY_SLOTS.filter(x => x.meal === 'snack' && !entries.some(e => e.slot === x.id));
+  if (snacksEmpty.length) html += `<div class="li tap" data-act="log-open" data-slot="${core.defaultSlotForNow().includes('snack') ? core.defaultSlotForNow() : 'afternoon-snack'}"><div class="main"><div class="t muted">Snack</div></div><span class="icon-btn">${icon('plus')}</span></div>`;
+  html += `</div></div>`;
   return html;
 }
 
@@ -134,10 +147,10 @@ function loadingHtml(msg) {
   return `<div class="loading-block"><span class="spinner"></span><span>${esc(msg)}</span></div>`;
 }
 
-async function photoFlow(file, date, slot) {
+export async function photoFlow(file, date, slot) {
   let img;
   try {
-    img = await compressImage(file, 1280, 0.82);
+    img = await compressImage(file, 1024, 0.8);
   } catch (e) {
     return toast(e.message);
   }
@@ -167,7 +180,7 @@ async function photoFlow(file, date, slot) {
   };
 }
 
-function describeFlow(date, slot) {
+export function describeFlow(date, slot) {
   const s = sheet({
     title: 'Describe your meal',
     body: `<textarea class="input" id="ds-text" style="min-height:130px" placeholder="e.g. Chicken burrito bowl: 150 g grilled chicken, 1 cup rice, black beans, salsa, a little cheese"></textarea><p class="tiny muted">Quantities you type are used exactly. Anything vague is estimated and marked.</p>`,
@@ -556,7 +569,7 @@ export function foodEditor(food = {}, onSaved, { notice = '' } = {}) {
 }
 
 async function labelFlow(file, onSaved) {
-  const img = await compressImage(file, 1600, 0.85);
+  const img = await compressImage(file, 1280, 0.85);
   const s = sheet({ title: 'Reading label', body: `<img class="photo-preview" src="${img.dataUrl}" alt="">${loadingHtml('Reading the nutrition panel…')}` });
   try {
     const r = await api.ai('label', { image: { mime: img.mime, data: img.base64 } });
@@ -939,7 +952,7 @@ function newRecipeSheet() {
     try {
       const images = [];
       for (const f of files) {
-        const c = await compressImage(f, 1600, 0.85);
+        const c = await compressImage(f, 1280, 0.82);
         images.push({ mime: c.mime, data: c.base64 });
       }
       const r = await api.ai('recipe', { images });
@@ -1037,10 +1050,7 @@ export function generateSheet(prefill = '') {
 
 // ---------------- actions ----------------
 register({
-  'nut-sub': el => {
-    state.sub.nutrition = el.dataset.v;
-    rerender();
-  },
+  'nut-sub': el => setSub('nutrition', el.dataset.v),
   'date-shift': el => {
     state.date = core.addDays(state.date, Number(el.dataset.v));
     rerender();

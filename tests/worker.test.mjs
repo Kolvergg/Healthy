@@ -154,7 +154,7 @@ test('HTTP API: auth, subscribe, config, test push end-to-end with mocked push s
     }
     if (url.includes('generativelanguage.googleapis.com')) {
       geminiCalls.push({ url, init });
-      if (url.includes('gemini-flash-latest')) return new Response(JSON.stringify({ error: { message: 'not found' } }), { status: 404 });
+      if (url.includes('gemini-3.1-flash-lite')) return new Response(JSON.stringify({ error: { message: 'This model is currently experiencing high demand.' } }), { status: 503 });
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"meal_name":"Toast","items":[{"name":"Bread, white, toasted","grams":60,"confidence":0.7}]}' }] } }] }), { status: 200 });
     }
     throw new Error('unexpected fetch ' + url);
@@ -170,10 +170,26 @@ test('HTTP API: auth, subscribe, config, test push end-to-end with mocked push s
 
     const ai = await (await call('POST', '/api/ai', { task: 'text', text: 'two slices of toast' })).json();
     assert.equal(ai.ok, true);
-    assert.equal(ai.model, 'gemini-3.7-flash');
+    // 3.1 Flash-Lite is "busy" twice (retry), so it falls through to 3.5 Flash-Lite — never a full Flash model.
+    assert.equal(ai.model, 'gemini-3.5-flash-lite');
+    assert.equal(geminiCalls.length, 3);
+    assert.ok(geminiCalls.every(c => /flash-lite/.test(c.url)), 'text tasks only use Flash-Lite');
     assert.equal(ai.data.items[0].grams, 60);
-    assert.equal(geminiCalls[1].init.headers['x-goog-api-key'], 'AQ.test');
-    assert.ok(!geminiCalls[1].url.includes('key='), 'key must not be in URL');
+    const sent = JSON.parse(geminiCalls[2].init.body);
+    assert.equal(sent.generationConfig.thinkingConfig.thinkingLevel, 'minimal');
+    assert.ok(sent.generationConfig.maxOutputTokens <= 1000);
+    assert.equal(sent.generationConfig.temperature, undefined);
+    assert.equal(geminiCalls[2].init.headers['x-goog-api-key'], 'AQ.test');
+    assert.ok(!geminiCalls[2].url.includes('key='), 'key must not be in URL');
+
+    // photos: Flash-Lite with medium image resolution; "accurate" mode tries Flash first
+    geminiCalls = [];
+    await call('POST', '/api/ai', { task: 'photo', image: { mime: 'image/jpeg', data: 'AAAA' } });
+    const ph = JSON.parse(geminiCalls[geminiCalls.length - 1].init.body);
+    assert.equal(ph.generationConfig.mediaResolution, 'MEDIA_RESOLUTION_MEDIUM');
+    geminiCalls = [];
+    await call('POST', '/api/ai', { task: 'photo', accurate: true, image: { mime: 'image/jpeg', data: 'AAAA' } });
+    assert.match(geminiCalls[0].url, /gemini-3\.6-flash:/);
 
     // a gone subscription gets removed
     globalThis.fetch = async () => new Response('', { status: 410 });
@@ -195,4 +211,21 @@ test('HTTP API: auth, subscribe, config, test push end-to-end with mocked push s
   const hk = await (await call('GET', '/api/healthkit')).json();
   assert.equal(hk[0].steps, '8432');
   assert.equal(hk[0].sleep_hours, 7.5);
+
+  // Health Auto Export payload
+  await call('POST', '/api/healthkit', { data: { metrics: [{ name: 'step_count', units: 'count', data: [{ date: '2026-11-12 00:00:00 +1100', qty: 4000 }, { date: '2026-11-12 09:00:00 +1100', qty: 1000 }] }, { name: 'weight_body_mass', units: 'kg', data: [{ date: '2026-11-12 07:00:00 +1100', qty: 71.4 }] }] } });
+  const hk2 = await (await call('GET', '/api/healthkit')).json();
+  const d12 = hk2.find(x => x.date === '2026-11-12');
+  assert.equal(d12.steps, 5000);
+  assert.equal(d12.weight_kg, 71.4);
+
+  // status: no cron yet → cronOk false; after a scheduled run → true, with upcoming reminders
+  await call('POST', '/api/config', { tz: 'Australia/Melbourne', water: { enabled: true, target: 2000, days: Array(7).fill({ start: '00:00', end: '23:59', interval: 60 }) }, medSlots: [], recurring: [], timed: [] });
+  let st = await (await call('GET', '/api/status')).json();
+  assert.equal(st.cronOk, false);
+  assert.ok(st.upcoming.length > 0);
+  await worker.scheduled({ scheduledTime: Date.now() }, env, { waitUntil: p => p });
+  await new Promise(r => setTimeout(r, 20));
+  st = await (await call('GET', '/api/status')).json();
+  assert.equal(st.cronOk, true);
 });
