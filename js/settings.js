@@ -156,7 +156,7 @@ const SECTIONS = {
     <p class="small ink2" style="margin:0">Every request uses <b>Gemini Flash-Lite</b> (Google's cheapest model) with thinking set to minimal, a hard cap on response length, and medium image resolution. Nutrition numbers never come from AI — only food names and portions do.</p>
     <div class="row between"><div><div class="h3">Higher-accuracy photos</div><div class="small muted">Uses Gemini Flash for meal photos only (≈5× the cost of Lite)</div></div>${toggleHtml('st-acc', s.aiAccurate, 'data-chg="st-accurate"')}</div></div>
     <div class="card" style="margin-top:12px"><div class="h3" style="margin-bottom:10px">This month</div>${cur ? `<div class="grid3"><div class="stat"><div class="k">Requests</div><div class="v num">${cur.calls}</div></div><div class="stat"><div class="k">Tokens in</div><div class="v num">${(cur.in / 1000).toFixed(1)}k</div></div><div class="stat"><div class="k">Tokens out</div><div class="v num">${(cur.out / 1000).toFixed(1)}k</div></div></div><div class="small muted" style="margin-top:10px">${Object.entries(cur.models).map(([m, n]) => `${esc(m)} × ${n}`).join(' · ')}</div>` : '<div class="small muted">No AI requests yet this month.</div>'}</div>
-    ${wv && wv.v < 2 ? `<div class="notice warn small" style="margin-top:12px">Your Worker still runs the old, more expensive AI code. Until you update it (Settings → Worker setup & update), AI requests go directly from this phone with your key, using the cheap settings.</div>` : ''}`;
+    ${wv && wv.v < 3 ? `<div class="notice warn small" style="margin-top:12px">Your Worker still runs the old, more expensive AI code. Until you update it (Settings → Worker setup & update), AI requests go directly from this phone with your key, using the cheap settings.</div>` : ''}`;
   }],
   calendar: ['Calendar reminders', async () => `<div class="card stack"><p class="small ink2" style="margin:0">A backup that needs no server: puts your medication, water, wind-down, routine, workout and task reminders into iPhone Calendar as alerts. They fire even offline. They don't know what you've already logged, so they can't skip a reminder once you've taken something — push notifications can.</p>
     <button class="btn primary block" data-act="st-ics">${icon('bell')} Add reminders to Calendar</button>
@@ -181,9 +181,9 @@ const SECTIONS = {
   worker: ['Worker setup & update', async () => {
     const st = await db.kvGet('cache:status', null);
     const wv = await db.kvGet('cache:workerVersion', null);
-    const needCode = !wv || wv.v < 2;
+    const needCode = !wv || wv.v < 3;
     const needCron = st && !st.error && !st.cronOk;
-    return `${needCode ? `<div class="notice warn small" style="margin-bottom:12px"><b>Update the Worker code.</b> Your Worker runs version ${wv ? wv.v : '?'}; this app expects version 2.</div>` : ''}${needCron ? `<div class="notice bad small" style="margin-bottom:12px"><b>The reminder engine isn't running.</b> Test notifications work because the app asks for them directly; scheduled ones need the Worker to wake up every minute, which only happens with a Cron Trigger.</div>` : ''}
+    return `${needCode ? `<div class="notice warn small" style="margin-bottom:12px"><b>Update the Worker code.</b> Your Worker runs version ${wv ? wv.v : '?'}; this app expects version 3.</div>` : ''}${needCron ? `<div class="notice bad small" style="margin-bottom:12px"><b>The reminder engine isn't running.</b> Test notifications work because the app asks for them directly; scheduled ones need the Worker to wake up every minute, which only happens with a Cron Trigger.</div>` : ''}
     <div class="card stack"><div class="h3">1 · Update the code (only when asked)</div>
     <ol class="small ink2" style="margin:0;padding-left:18px;line-height:1.55"><li>Tap <b>Copy Worker code</b>.</li><li>dash.cloudflare.com → Workers & Pages → your worker → <b>Edit code</b>.</li><li>Select all, paste, tap <b>Deploy</b>.</li></ol>
     <button class="btn primary block" data-act="st-copy-worker">${icon('copy')} Copy Worker code</button></div>

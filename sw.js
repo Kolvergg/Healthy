@@ -1,6 +1,6 @@
 // HealthOS service worker: offline app shell + push notifications.
 // Bump VERSION whenever you change any file so phones pick up the update.
-const VERSION = 'healthos-v2.0.0';
+const VERSION = 'healthos-v2.1.0';
 const ASSETS = [
   './',
   './index.html',

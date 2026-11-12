@@ -16,7 +16,7 @@
 //   Variable GEMINI_TEXT_MODEL / GEMINI_VISION_MODEL  optional model overrides
 //   Cron trigger                * * * * *   (every minute)
 
-const WORKER_VERSION = 2;
+const WORKER_VERSION = 3;
 const enc = new TextEncoder();
 
 class HttpError extends Error {
@@ -439,8 +439,14 @@ async function gemini(env, task, parts, { accurate = false, max: maxOverride = 0
 const imagePart = img => ({ inline_data: { mime_type: img.mime || 'image/jpeg', data: img.data } });
 
 // Compact on purpose: every word here is paid for on every call.
-const ITEM_SCHEMA = `"items":[{"name":"AFCD-style name e.g. 'Chicken, breast, grilled'","search_terms":["1-3 alternates"],"state":"raw|cooked|boiled|grilled|fried|baked|roasted|steamed|toasted|canned|dried|other","grams":n,"grams_low":n,"grams_high":n,"confidence":0-1,"notes":"short or null"}]`;
-const RULES = `No calories or nutrients (app uses a database). List oils, butter, sauces separately when likely. Australian names. Grams as eaten (cooked weight if cooked). Wide low/high when unsure. JSON only.`;
+const P100 = `{"kcal":n,"protein":n,"fat":n,"satfat":n,"carbs":n,"sugars":n,"fibre":n,"sodium":n(mg)}`;
+const ITEM_SCHEMA = `"items":[{"kind":"dish|food","name":s,"search_terms":["1-3 AFCD-style alternates"],"state":"raw|cooked|boiled|grilled|fried|baked|roasted|steamed|toasted|canned|dried|other","grams":n,"grams_low":n,"grams_high":n,"confidence":0-1,"per100":${P100}|null,"notes":s|null}]`;
+const DISH_RULES = `- NEVER add foods, proteins or ingredients the user did not name or that are not clearly visible. "Chicken pad see ew" means chicken only — no egg, pork, beef or mince unless stated.
+- A combined dish (stir-fry, noodles, curry, pasta, burger, wrap, sandwich, soup, salad, pizza, takeaway meal) = ONE item: kind "dish", name = the dish exactly as the user called it, grams = the whole serve, per100 = typical nutrition per 100 g of that dish as made with only what was named. Typical restaurant dishes are 120–250 kcal per 100 g; be realistic.
+- Separate foods (e.g. "2 eggs and toast", a plate of chicken, rice and broccoli) = one item each, kind "food", per100 null, Australian AFCD-style search terms.
+- Use quantities the user gave exactly (1 cup=250 mL, 1 tbsp=20 mL, 1 tsp=5 mL).
+- JSON only.`;
+
 const RECIPE_SCHEMA = `{"name":s,"servings":n|null,"prep_minutes":n|null,"cook_minutes":n|null,"meals":["breakfast|lunch|dinner|snack"],"ingredients":[{"name":s,"quantity_text":"as written","grams":n|null,"grams_is_estimate":bool,"state":s,"search_terms":[s]}],"steps":[s],"missing":[s],"substitutions":[{"ingredient":s,"swap":s,"why":s}]}`;
 const MEASURES = '1 cup=250 mL, 1 tbsp=20 mL, 1 tsp=5 mL';
 
@@ -450,16 +456,19 @@ async function aiTask(env, body) {
   switch (body.task) {
     case 'photo': {
       if (!body.image) throw new HttpError(400, 'image required');
-      const prompt = `Meal photo → foods and portions.${body.text ? ` User note: "${String(body.text).slice(0, 300)}".` : ''}
+      const prompt = `Meal photo → what it is and how much.${body.text ? ` The user says: "${String(body.text).slice(0, 300)}" — treat their words as correct and use their dish name exactly.` : ''}
 JSON: {"meal_name":s,${ITEM_SCHEMA},"scale_reference":s|null,"overall_confidence":0-1,"caveats":[s]}
-${RULES}`;
+Rules:
+${DISH_RULES}
+- Grams as eaten. Wide low/high when unsure.`;
       return gemini(env, 'photo', [{ text: prompt }, imagePart(body.image)], { accurate });
     }
     case 'text': {
       const prompt = `What the user ate: """${String(body.text || '').slice(0, 1500)}"""
-Split into foods. Use given quantities exactly (${MEASURES}); high confidence for those.
-JSON: {"meal_name":s,${ITEM_SCHEMA},"caveats":[s]}
-${RULES}`;
+JSON: {"meal_name":"the user's words, tidied",${ITEM_SCHEMA},"caveats":[s]}
+Rules:
+${DISH_RULES}
+- If no amount is given, use one typical Australian serve.`;
       return gemini(env, 'text', [{ text: prompt }]);
     }
     case 'label': {

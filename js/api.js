@@ -40,7 +40,7 @@ export async function ai(task, payload = {}) {
   const body = { task, ...payload, accurate: task === 'photo' && s.aiAccurate ? true : undefined };
   let r;
   // Until the Worker is updated to v2 (cheap models), use the key on this phone if there is one.
-  const viaWorker = (await configured()) && (!s.geminiKey || (await workerVersion()) >= 2);
+  const viaWorker = (await configured()) && (!s.geminiKey || (await workerVersion()) >= 3);
   if (viaWorker) {
     try {
       r = await call('/api/ai', { method: 'POST', body, timeout: 90000 });

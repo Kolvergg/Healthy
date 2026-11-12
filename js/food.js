@@ -202,36 +202,62 @@ export function describeFlow(date, slot) {
   };
 }
 
+/** Finds (or creates) the saved, clearly-labelled estimate for a whole dish, so a dish you've
+ * logged before reuses the same numbers — and corrections you make to it stick. */
+async function dishFood(name, per100, note) {
+  const key = name.trim().toLowerCase();
+  const existing = (await foods()).find(f => f.source !== 'afcd' && f.name.trim().toLowerCase() === key);
+  if (existing) return existing;
+  const food = { name: name.trim(), source: 'ai-estimate', per100: N.sanePer100(per100), note: note || 'AI estimate for the whole dish — edit in Food → Foods if you know better.' };
+  await db.put('foods', food);
+  return food;
+}
+const tidy = t => {
+  const x = String(t || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  return x ? x[0].toUpperCase() + x.slice(1) : '';
+};
+
 async function draftFromAi(data, { date, slot, photo, source, note }) {
   const all = await foods();
-  const items = (data.items || []).map((it, i) => {
-    const cands = N.matchAiItem(it, all, 6);
-    const best = cands[0];
+  const items = [];
+  let i = 0;
+  for (const it of data.items || []) {
     const item = {
-      key: 'i' + i + Date.now(),
+      key: 'i' + i++ + Date.now(),
       kind: 'food',
-      aiName: it.name,
-      name: it.name,
+      aiName: tidy(it.name),
+      name: tidy(it.name),
       grams: Math.max(1, Math.round(N.num(it.grams) || 100)),
       low: N.num(it.grams_low),
       high: N.num(it.grams_high),
       confidence: N.num(it.confidence),
       state: it.state,
-      method: it.method,
       notes: it.notes,
-      candidates: cands.map(c => ({ id: c.food.id, score: c.score })),
+      candidates: [],
     };
-    if (best && best.score >= 0.45) setFood(item, best.food, best.score);
-    return item;
-  });
-  const confs = items.map(i => i.confidence).filter(c => c != null);
+    if (it.kind === 'dish' && it.per100) {
+      // Whole dish: one item, named exactly as you said it, estimated as a dish (not guessed ingredients).
+      if (source === 'text' && (data.items || []).length === 1 && note) item.aiName = item.name = tidy(note);
+      item.grams = Math.min(item.grams, 1000);
+      const food = await dishFood(item.name, it.per100);
+      item.candidates = [{ id: food.id, score: 1 }, ...N.matchAiItem(it, all, 4).filter(c => c.food.id !== food.id).map(c => ({ id: c.food.id, score: c.score }))];
+      setFood(item, food, 1);
+    } else {
+      const cands = N.matchAiItem(it, all, 6);
+      item.candidates = cands.map(c => ({ id: c.food.id, score: c.score }));
+      if (cands[0] && cands[0].score >= 0.6) setFood(item, cands[0].food, cands[0].score);
+    }
+    items.push(item);
+  }
+  const confs = items.map(x => x.confidence).filter(c => c != null);
   return {
     date,
     slot,
     photo,
     source,
     note,
-    name: data.meal_name || 'Meal',
+    // Text: the meal is called exactly what you typed.
+    name: source === 'text' && note ? tidy(note) : tidy(data.meal_name) || 'Meal',
     confidence: N.num(data.overall_confidence) ?? (confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : null),
     caveats: [...(data.caveats || []), data.scale_reference ? `Scale reference: ${data.scale_reference}` : null].filter(Boolean),
     items,

@@ -176,3 +176,25 @@ test('AFCD energy in kcal is not mistaken for kJ', () => {
   const { foods } = parseAfcd([{ name: 's', rows }]);
   close(foods[0].per100.kcal, 140);
 });
+
+test('matching never swaps one protein for another, and needs the actual food word', async () => {
+  const N = await import('../js/nutrition.js');
+  const foods = [
+    { id: 'b', name: 'Beef, steak, stir-fried', source: 'afcd', per100: {} },
+    { id: 'c', name: 'Chicken, breast, stir-fried', source: 'afcd', per100: {} },
+    { id: 'n', name: 'Noodles, rice, stir-fried', source: 'afcd', per100: {} },
+  ];
+  const r = N.matchFoods('Chicken stir-fried', foods);
+  assert.equal(r[0].food.id, 'c');
+  assert.ok(!r.some(x => x.food.id === 'b'), 'beef must not match chicken');
+  assert.ok(!N.matchFoods('Pad see ew', foods).length, 'unrelated foods must not match on cooking words');
+});
+
+test('AI dish estimates are clamped and calories agree with macros', async () => {
+  const N = await import('../js/nutrition.js');
+  const p = N.sanePer100({ kcal: 900, protein: 8, fat: 100, satfat: 200, carbs: 20, sugars: 50, fibre: 1, sodium: 500 });
+  assert.equal(p.fat, 30);
+  assert.ok(p.satfat <= p.fat);
+  assert.ok(p.sugars <= p.carbs);
+  assert.equal(p.kcal, Math.round(4 * 8 + 4 * 20 + 9 * 30 + 2));
+});

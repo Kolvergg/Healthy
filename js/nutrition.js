@@ -208,11 +208,22 @@ function foodTokens(f) {
   return t;
 }
 
+// Main protein words: a query for one must never match a food that is a different one
+// ("chicken stir-fry" must not become "Beef, steak, stir-fried").
+const PROTEINS = new Set(['chicken', 'beef', 'pork', 'lamb', 'fish', 'salmon', 'tuna', 'prawn', 'shrimp', 'turkey', 'duck', 'veal', 'tofu', 'bacon', 'ham', 'sausage', 'kangaroo', 'mince', 'squid', 'barramundi', 'snapper', 'cod']);
+// Words that describe preparation, not the food itself.
+const GENERIC = new Set(['stir', 'style', 'dish', 'homemade', 'plain', 'mixed', 'fresh', 'prepared', 'with', 'sauce', 'takeaway', 'commercial']);
+
 export function scoreFood(query, food, state) {
   const q = tokens(query);
   if (!q.length) return 0;
   const ft = foodTokens(food);
   const set = new Set(ft);
+  const qp = q.filter(t => PROTEINS.has(t));
+  const fp = ft.filter(t => PROTEINS.has(t));
+  if (qp.length && fp.length && !qp.some(t => set.has(t))) return 0;
+  const core = q.filter(t => !STATE_WORDS.includes(t) && !GENERIC.has(t));
+  if (core.length && !core.some(t => set.has(t) || (t.length >= 3 && ft.some(x => x.startsWith(t))))) return 0;
   let hit = 0;
   for (const t of q) {
     if (set.has(t)) hit += 1;
@@ -253,6 +264,24 @@ export function matchAiItem(item, foods, limit = 6) {
     }
   }
   return [...best.values()].sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+/**
+ * Sanity limits for an AI-estimated dish (per 100 g). Clamps impossible values and makes
+ * calories agree with the macros, so one bad guess can't produce "100 g of fat".
+ */
+export function sanePer100(p) {
+  const o = normalisePer100(p);
+  const lim = { protein: 35, fat: 30, satfat: 15, carbs: 80, sugars: 80, fibre: 25, sodium: 2500 };
+  for (const [k, max] of Object.entries(lim)) if (o[k] != null) o[k] = Math.max(0, Math.min(max, o[k]));
+  if (o.satfat != null && o.fat != null) o.satfat = Math.min(o.satfat, o.fat);
+  if (o.sugars != null && o.carbs != null) o.sugars = Math.min(o.sugars, o.carbs);
+  if (o.protein != null && o.fat != null && o.carbs != null) {
+    const derived = 4 * o.protein + 4 * o.carbs + 9 * o.fat + 2 * (o.fibre || 0);
+    if (o.kcal == null || Math.abs(o.kcal - derived) > 0.25 * derived) o.kcal = Math.round(derived);
+  }
+  if (o.kcal != null) o.kcal = Math.max(0, Math.min(600, o.kcal));
+  return o;
 }
 
 export function confidenceLabel(c) {
