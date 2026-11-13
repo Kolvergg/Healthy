@@ -16,7 +16,7 @@
 //   Variable GEMINI_TEXT_MODEL / GEMINI_VISION_MODEL  optional model overrides
 //   Cron trigger                * * * * *   (every minute)
 
-const WORKER_VERSION = 3;
+const WORKER_VERSION = 4;
 const enc = new TextEncoder();
 
 class HttpError extends Error {
@@ -352,6 +352,9 @@ const TASKS = {
   generate: [LITE, 'minimal', 2600],
   improve: [LITE, 'minimal', 2600],
   estimate: [LITE, 'minimal', 200],
+  // Watching a cooking video and judging amounts is hard: always tries Flash first (via
+  // accurate mode), with low thinking. A recipe import costs well under one cent.
+  video: [LITE, 'low', 3000, 'MEDIA_RESOLUTION_MEDIUM'],
 };
 
 function parseJsonLoose(text) {
@@ -438,6 +441,141 @@ async function gemini(env, task, parts, { accurate = false, max: maxOverride = 0
 
 const imagePart = img => ({ inline_data: { mime_type: img.mime || 'image/jpeg', data: img.data } });
 
+const GEMINI = 'https://generativelanguage.googleapis.com';
+/**
+ * Puts a video or image into Gemini's file store (the Files API) and waits until it is
+ * ready. The bytes are passed straight through, never base64-encoded, so this stays
+ * inside a free Worker's CPU limit even for a 50 MB video. Files expire after 48 h.
+ */
+async function geminiUpload(env, bytes, mime) {
+  if (!env.GEMINI_API_KEY) throw new HttpError(500, 'GEMINI_API_KEY secret is not set on the Worker');
+  const key = { 'x-goog-api-key': env.GEMINI_API_KEY };
+  const start = await fetch(`${GEMINI}/upload/v1beta/files`, {
+    method: 'POST',
+    headers: { ...key, 'x-goog-upload-protocol': 'resumable', 'x-goog-upload-command': 'start', 'x-goog-upload-header-content-length': String(bytes.byteLength), 'x-goog-upload-header-content-type': mime, 'content-type': 'application/json' },
+    body: JSON.stringify({ file: { display_name: 'healthos-' + Date.now() } }),
+  });
+  const upUrl = start.headers.get('x-goog-upload-url');
+  if (!upUrl) throw new HttpError(502, `Gemini would not accept the upload (${start.status})`);
+  const up = await fetch(upUrl, { method: 'POST', headers: { 'x-goog-upload-offset': '0', 'x-goog-upload-command': 'upload, finalize' }, body: bytes });
+  const j = await up.json().catch(() => null);
+  let file = j && j.file;
+  if (!file || !file.uri) throw new HttpError(502, (j && j.error && j.error.message) || 'Upload to Gemini failed');
+  for (let i = 0; i < 40 && file.state === 'PROCESSING'; i++) {
+    await sleep(1500);
+    file = await (await fetch(`${GEMINI}/v1beta/${file.name}`, { headers: key })).json();
+  }
+  if (file.state && file.state !== 'ACTIVE') throw new HttpError(502, 'Gemini could not process that video. Try a shorter one.');
+  return { file_data: { mime_type: file.mimeType || mime, file_uri: file.uri } };
+}
+
+/** Recipe from a cooking video, slideshow photos and/or a caption. Estimates unstated amounts. */
+function recipeFromMedia(env, mediaParts, caption = '') {
+  const what = mediaParts.length ? 'Watch this cooking post (video with sound, or photos)' : 'Read this cooking post caption';
+  const prompt = `${what} and write down the recipe exactly as it is made.${caption ? `\nCaption: \"\"\"${String(caption).slice(0, 4000)}\"\"\"` : ''}
+- Include every ingredient that is shown, said or written (on-screen text, voice-over, caption). NEVER add ingredients that are not in the post.
+- quantity_text: the amount as said or shown. If none is given, estimate it from what you see (spoon or cup size, packet size, how full the pan or bowl is) and write it like "~2 tbsp (estimated)"; set grams_is_estimate true.
+- grams: always a number, using ${MEASURES}.
+- servings: as stated, otherwise estimate from how much food is made.
+- steps: short, in the order they are done.
+- missing: the names of ingredients whose amounts you estimated.
+JSON: ${RECIPE_SCHEMA}`;
+  // Media first, then the instructions: Gemini follows this order best.
+  return gemini(env, 'video', [...mediaParts, { text: prompt }], { accurate: true });
+}
+
+const DESKTOP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36';
+/** Pulls the post data TikTok embeds in its page: caption, video address, slideshow photos. */
+function tiktokItem(html) {
+  const grab = id => {
+    const m = html.match(new RegExp(`<script[^>]+id="${id}"[^>]*>([\\s\\S]*?)</script>`));
+    if (!m) return null;
+    try {
+      return JSON.parse(m[1]);
+    } catch {
+      return null;
+    }
+  };
+  const u = grab('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+  const scope = (u && u.__DEFAULT_SCOPE__) || {};
+  for (const k of ['webapp.video-detail', 'webapp.reflow.video.detail']) {
+    const it = scope[k] && scope[k].itemInfo && scope[k].itemInfo.itemStruct;
+    if (it) return it;
+  }
+  const sigi = grab('SIGI_STATE');
+  const mod = sigi && sigi.ItemModule;
+  const first = mod && Object.values(mod)[0];
+  return first || null;
+}
+function tiktokMedia(item) {
+  if (!item) return { videoUrl: null, images: [], caption: '' };
+  const v = item.video || {};
+  // Prefer the smallest stream: the AI samples about 1 frame a second, so quality barely matters.
+  const streams = (v.bitrateInfo || [])
+    .map(b => ({ bitrate: b.Bitrate || 0, url: b.PlayAddr && b.PlayAddr.UrlList && b.PlayAddr.UrlList[0] }))
+    .filter(b => b.url)
+    .sort((a, b) => a.bitrate - b.bitrate);
+  const videoUrl = (streams[0] && streams[0].url) || (typeof v.playAddr === 'string' && v.playAddr) || (typeof v.downloadAddr === 'string' && v.downloadAddr) || null;
+  const images = ((item.imagePost && item.imagePost.images) || []).map(i => i.imageURL && i.imageURL.urlList && i.imageURL.urlList[0]).filter(Boolean);
+  return { videoUrl: images.length ? null : videoUrl, images, caption: item.desc || '' };
+}
+
+async function importTikTok(env, url) {
+  let target = url;
+  const host = new URL(url).hostname;
+  if (/^(vm|vt)\./.test(host) || new URL(url).pathname.startsWith('/t/')) {
+    const r = await fetch(url, { redirect: 'follow', headers: { 'user-agent': DESKTOP_UA } });
+    target = r.url;
+  }
+  const notes = [];
+  let item = null;
+  let cookie = '';
+  try {
+    const page = await fetch(target, { redirect: 'follow', headers: { 'user-agent': DESKTOP_UA, accept: 'text/html', 'accept-language': 'en-AU,en;q=0.9' } });
+    cookie = (page.headers.getSetCookie ? page.headers.getSetCookie() : []).map(c => c.split(';')[0]).join('; ');
+    item = tiktokItem(await page.text());
+  } catch (e) {
+    notes.push('page: ' + e.message);
+  }
+  const media = tiktokMedia(item);
+  let caption = media.caption;
+  let thumbnail = (item && item.video && item.video.cover) || null;
+  if (!item) {
+    const o = await fetch(`https://www.tiktok.com/oembed?url=${encodeURIComponent(target)}`).catch(() => null);
+    if (o && o.ok) {
+      const j = await o.json();
+      caption = j.title || '';
+      thumbnail = j.thumbnail_url || null;
+    }
+  }
+  const headers = { 'user-agent': DESKTOP_UA, referer: 'https://www.tiktok.com/', ...(cookie ? { cookie } : {}) };
+  const parts = [];
+  try {
+    if (media.images.length) {
+      for (const src of media.images.slice(0, 10)) {
+        const r = await fetch(src, { headers });
+        if (r.ok) parts.push(await geminiUpload(env, await r.arrayBuffer(), r.headers.get('content-type') || 'image/jpeg'));
+      }
+    } else if (media.videoUrl) {
+      const r = await fetch(media.videoUrl, { headers });
+      const size = Number(r.headers.get('content-length') || 0);
+      if (!r.ok) notes.push('video ' + r.status);
+      else if (size > 80e6) notes.push('video too large');
+      else parts.push(await geminiUpload(env, await r.arrayBuffer(), 'video/mp4'));
+    }
+  } catch (e) {
+    notes.push(e.message);
+  }
+  if (!parts.length && (!caption || caption.length < 20)) {
+    throw new HttpError(422, 'TikTok would not let the Worker download this video. In TikTok tap Share → Save video, then here choose “Video” and pick it from your photos.');
+  }
+  const out = await recipeFromMedia(env, parts, caption);
+  out.source = parts.length ? (media.images.length ? 'tiktok-photos' : 'tiktok-video') : 'tiktok-caption';
+  out.data.image_url = thumbnail;
+  if (notes.length) out.notes = notes;
+  return out;
+}
+
 // Compact on purpose: every word here is paid for on every call.
 const P100 = `{"kcal":n,"protein":n,"fat":n,"satfat":n,"carbs":n,"sugars":n,"fibre":n,"sodium":n(mg)}`;
 const ITEM_SCHEMA = `"items":[{"kind":"dish|food","name":s,"search_terms":["1-3 AFCD-style alternates"],"state":"raw|cooked|boiled|grilled|fried|baked|roasted|steamed|toasted|canned|dried|other","grams":n,"grams_low":n,"grams_high":n,"confidence":0-1,"per100":${P100}|null,"notes":s|null}]`;
@@ -485,7 +623,14 @@ ${body.text ? `Source:\n"""${String(body.text).slice(0, 12000)}"""` : ''}` }];
       return gemini(env, 'recipe', parts);
     }
     case 'url': {
-      const got = await fetchRecipeSource(String(body.url || ''));
+      let link;
+      try {
+        link = new URL(String(body.url || '').trim());
+      } catch {
+        throw new HttpError(400, 'That is not a valid link');
+      }
+      if (/(^|\.)tiktok\.com$/.test(link.hostname)) return importTikTok(env, link.toString());
+      const got = await fetchRecipeSource(link.toString());
       if (got.kind === 'jsonld') {
         const r = got.recipe;
         const text = `Title: ${r.name}\nServes: ${r.yield || 'not stated'}\nIngredients:\n${r.ingredients.map(i => '- ' + i).join('\n')}`;
@@ -658,7 +803,7 @@ async function handle(request, env) {
   if (!env.KV) throw new HttpError(500, 'KV binding named "KV" is missing');
   const auth = request.headers.get('authorization') || '';
   if (!safeEqual(auth.replace(/^Bearer\s+/i, ''), env.APP_TOKEN)) throw new HttpError(401, 'Wrong app token');
-  const body = ['POST', 'PUT'].includes(request.method) && path !== '/api/backup' ? await request.json().catch(() => ({})) : null;
+  const body = ['POST', 'PUT'].includes(request.method) && path !== '/api/backup' && path !== '/api/video' ? await request.json().catch(() => ({})) : null;
 
   switch (`${request.method} ${path}`) {
     case 'GET /api/ping':
@@ -764,6 +909,18 @@ async function handle(request, env) {
       }
       return json(env, out);
     }
+    case 'POST /api/video': {
+      // A cooking video (or photo) sent from the phone, raw bytes. Gemini watches it.
+      let mime = (request.headers.get('content-type') || 'video/mp4').split(';')[0].trim().toLowerCase();
+      if (mime === 'video/quicktime') mime = 'video/mov'; // iPhone .mov: Gemini's name for it
+      if (!/^(video|image)\//.test(mime)) throw new HttpError(400, 'Send a video or image');
+      const bytes = await request.arrayBuffer();
+      if (!bytes.byteLength) throw new HttpError(400, 'The file was empty');
+      if (bytes.byteLength > 95e6) throw new HttpError(413, 'That video is over 95 MB. Trim it first.');
+      const part = await geminiUpload(env, bytes, mime);
+      const r = await recipeFromMedia(env, [part], url.searchParams.get('caption') || '');
+      return json(env, { ok: true, model: r.model, source: 'video', data: r.data, usage: r.usage || null });
+    }
     case 'POST /api/ai': {
       const r = await aiTask(env, body || {});
       return json(env, { ok: true, model: r.model, source: r.source || null, data: r.data, usage: r.usage || null });
@@ -785,5 +942,5 @@ export default {
     ctx.waitUntil(runSchedule(env, event.scheduledTime));
   },
   // Exposed for the test-suite only.
-  _test: { aiTask, upcoming, haeToDays, TASKS, dueReminders, encryptPayload, vapidJwt, createVapidKeys, localParts, extractJsonLdRecipe, splitOneoffs, parseJsonLoose, b64urlDecode, b64urlEncode, handle },
+  _test: { aiTask, tiktokItem, tiktokMedia, recipeFromMedia, geminiUpload, upcoming, haeToDays, TASKS, dueReminders, encryptPayload, vapidJwt, createVapidKeys, localParts, extractJsonLdRecipe, splitOneoffs, parseJsonLoose, b64urlDecode, b64urlEncode, handle },
 };

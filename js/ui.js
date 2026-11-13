@@ -317,7 +317,13 @@ export function promptSheet(title, { label = '', value = '', type = 'text', plac
       resolve(inp.value);
       s.close();
     };
-    inp.onkeydown = e => e.key === 'Enter' && yes();
+    // Must not return false from an on* handler: that cancels every keystroke.
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        yes();
+      }
+    });
     s.foot.querySelector('[data-no]').onclick = () => s.close();
     s.foot.querySelector('[data-yes]').onclick = yes;
   });

@@ -35,15 +35,17 @@ export async function call(path, { method = 'GET', body, raw = false, timeout = 
   return data;
 }
 
-export async function ai(task, payload = {}) {
+export const UPDATE_WORKER = 'Your Worker needs the latest code for this (version 4). Settings → Worker setup & update → Copy Worker code, then in Cloudflare: Edit code → paste → Deploy.';
+export async function ai(task, payload = {}, { timeout = 90000 } = {}) {
   const s = await core.getSettings();
   const body = { task, ...payload, accurate: task === 'photo' && s.aiAccurate ? true : undefined };
   let r;
   // Until the Worker is updated to v2 (cheap models), use the key on this phone if there is one.
-  const viaWorker = (await configured()) && (!s.geminiKey || (await workerVersion()) >= 3);
+  // Links always go through the Worker: a phone browser can't fetch other sites directly.
+  const viaWorker = (await configured()) && (!s.geminiKey || task === 'url' || (await workerVersion()) >= 3);
   if (viaWorker) {
     try {
-      r = await call('/api/ai', { method: 'POST', body, timeout: 90000 });
+      r = await call('/api/ai', { method: 'POST', body, timeout });
     } catch (e) {
       // An old Worker, or a Worker without the key: fall back to the key on this phone if there is one.
       if (!s.geminiKey || !/GEMINI_API_KEY|Unknown AI task|not found/i.test(e.message)) throw e;
@@ -56,6 +58,15 @@ export async function ai(task, payload = {}) {
     const x = await worker._test.aiTask({ GEMINI_API_KEY: s.geminiKey }, body);
     r = { ok: true, model: x.model, source: x.source || null, data: x.data, usage: x.usage };
   }
+  trackUsage(r);
+  return r;
+}
+/** Sends a cooking video from the phone to the Worker, which has Gemini watch it. */
+export async function video(file) {
+  if (!(await configured())) throw new Error('Connect your Worker in Settings → Connection first.');
+  if ((await workerVersion(true)) < 4) throw new Error(UPDATE_WORKER);
+  if (file.size > 95e6) throw new Error('That video is over 95 MB. Trim it in Photos first.');
+  const r = await call('/api/video', { method: 'POST', body: file, raw: true, timeout: 240000 });
   trackUsage(r);
   return r;
 }

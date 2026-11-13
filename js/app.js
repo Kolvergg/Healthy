@@ -157,12 +157,8 @@ document.addEventListener('keydown', e => {
 document.addEventListener('touchmove', e => {
   if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault();
 }, { passive: false });
-let lastTouchEnd = 0;
-document.addEventListener('touchend', e => {
-  const now = Date.now();
-  if (now - lastTouchEnd < 300 && !e.target.closest('input, textarea, select')) e.preventDefault();
-  lastTouchEnd = now;
-}, { passive: false });
+// Double-tap zoom is off via `touch-action: manipulation` in the CSS. Don't cancel quick
+// second taps in JS: that swallowed Save taps and repeated button presses.
 
 // ---------------- swipe from the left edge to go back ----------------
 let edge = null;

@@ -768,7 +768,7 @@ export async function recipeEditor(recipe, { title } = {}) {
     <div class="row between" style="margin-top:8px"><span class="small ink2">Grams ${g.gramsEstimate ? '<span class="badge medium">converted</span>' : ''}${g.grams == null ? '<span class="badge low">needed</span>' : ''}</span><div class="stepper"><input class="input sm num" type="number" inputmode="decimal" value="${g.grams ?? ''}" data-g="${g.key}" data-r="grams"><span class="small muted">g</span></div></div></div>`;
   };
   const paint = () => {
-    s.setBody(`${r.missing && r.missing.length ? `<div class="notice warn small" style="margin-bottom:12px"><b>The source didn't state:</b> ${r.missing.map(esc).join(', ')}. Please confirm these.</div>` : ''}
+    s.setBody(`${r.missing && r.missing.length ? `<div class="notice warn small" style="margin-bottom:12px"><b>Estimated, not stated in the source:</b> ${r.missing.map(esc).join(', ')}. Check these amounts.</div>` : ''}
     ${r.changes && r.changes.length ? `<div class="notice small" style="margin-bottom:12px"><b>Changes:</b><ul style="margin:6px 0 0;padding-left:18px">${r.changes.map(c => `<li>${esc(c)}</li>`).join('')}</ul></div>` : ''}
     <div class="row" style="gap:12px;align-items:flex-start;margin-bottom:12px"><label style="position:relative;flex:none">${r.photo ? `<img class="thumb" style="width:76px;height:76px" src="${r.photo}" alt="">` : `<div class="thumb" style="width:76px;height:76px">${icon('image')}</div>`}<input type="file" accept="image/*" id="re-photo" style="position:absolute;inset:0;opacity:0"></label><div class="grow fields"><label class="field"><span>Name</span><input class="input" id="re-name" value="${esc(r.name)}"></label></div></div>
     <div class="fields three"><label class="field"><span>Servings${missingServings ? ' ⚠' : ''}</span><input class="input num" type="number" inputmode="decimal" id="re-serv" value="${r.servings ?? ''}" ${missingServings ? 'style="border-color:var(--warn)"' : ''}></label><label class="field"><span>Prep min</span><input class="input num" type="number" id="re-prep" value="${r.prepMin ?? ''}"></label><label class="field"><span>Cook min</span><input class="input num" type="number" id="re-cook" value="${r.cookMin ?? ''}"></label></div>
@@ -964,7 +964,8 @@ function newRecipeSheet() {
   const s = sheet({
     title: 'Add a recipe',
     body: `<div class="big-actions">
-      <button class="big-action" data-x="link">${icon('link')}<b>Link</b><small>Website or TikTok</small></button>
+      <button class="big-action" data-x="link">${icon('link')}<b>Link</b><small>Website or TikTok — AI watches the video</small></button>
+      <label class="big-action">${icon('camera')}<b>Video</b><small>A cooking video saved to your phone</small><input type="file" accept="video/*" id="nr-video"></label>
       <label class="big-action">${icon('image')}<b>Screenshots</b><small>One or more images of a recipe</small><input type="file" accept="image/*" multiple id="nr-shots"></label>
       <button class="big-action" data-x="text">${icon('note')}<b>Paste text</b><small>Caption, notes, anything</small></button>
       <button class="big-action" data-x="gen">${icon('sparkle')}<b>Generate</b><small>“High-protein chicken dinner”</small></button>
@@ -988,6 +989,18 @@ function newRecipeSheet() {
       s.setBody(`<div class="notice bad">${esc(err.message)}</div>`);
     }
   };
+  s.body.querySelector('#nr-video').onchange = async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    s.setBody(loadingHtml('Uploading and watching the video… (up to a minute)'));
+    try {
+      const r = await api.video(file);
+      s.close();
+      recipeEditor(await recipeDraftFromAi(r.data));
+    } catch (err) {
+      s.setBody(`<div class="notice bad">${esc(err.message)}</div>`);
+    }
+  };
   s.body.querySelectorAll('[data-x]').forEach(b => (b.onclick = async () => {
     const x = b.dataset.x;
     if (x === 'manual') {
@@ -997,16 +1010,15 @@ function newRecipeSheet() {
     if (x === 'link') {
       const url = await promptSheet('Recipe link', { label: 'Paste a website or TikTok link', type: 'url', placeholder: 'https://', ok: 'Import' });
       if (!url) return;
-      s.setBody(loadingHtml('Fetching and extracting the recipe…'));
+      const tiktok = /tiktok\.com/i.test(url);
+      s.setBody(loadingHtml(tiktok ? 'Downloading and watching the TikTok… (up to a minute)' : 'Fetching and extracting the recipe…'));
       try {
-        const r = await api.ai('url', { url: url.trim() });
-        let photo = null;
+        if (tiktok && (await api.workerVersion(true)) < 4) throw new Error(api.UPDATE_WORKER);
+        const r = await api.ai('url', { url: url.trim() }, { timeout: 180000 });
         s.close();
-        const draft = await recipeDraftFromAi(r.data, { sourceUrl: url.trim(), photo });
-        if (r.source === 'tiktok') draft.missing = [...new Set([...(draft.missing || []), 'check quantities against the video'])];
-        recipeEditor(draft);
+        recipeEditor(await recipeDraftFromAi(r.data, { sourceUrl: url.trim() }));
       } catch (err) {
-        s.setBody(`<div class="notice bad">${esc(err.message)}</div><p class="small muted">Tip: for TikToks without the recipe in the caption, screenshot the recipe and use Screenshots.</p>`);
+        s.setBody(`<div class="notice bad">${esc(err.message)}</div>${tiktok ? '<p class="small muted">Backup: in TikTok tap Share → Save video, then choose <b>Video</b> here and pick it from your photos.</p>' : ''}`);
       }
     }
     if (x === 'text') {
