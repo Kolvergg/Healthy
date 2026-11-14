@@ -16,7 +16,7 @@
 //   Variable GEMINI_TEXT_MODEL / GEMINI_VISION_MODEL  optional model overrides
 //   Cron trigger                * * * * *   (every minute)
 
-const WORKER_VERSION = 4;
+const WORKER_VERSION = 5;
 const enc = new TextEncoder();
 
 class HttpError extends Error {
@@ -783,6 +783,210 @@ function cors(env) {
     'Access-Control-Max-Age': '86400',
   };
 }
+// ---------------- Google Health (Fitbit) ----------------
+// Flow: the app asks for a sign-in link (authorised), opens it in Safari, Google sends the
+// browser back to /api/google/callback (public; checked with a one-time state value), and
+// the refresh token is kept in KV. The cron then pulls steps, sleep and workouts hourly
+// into the same per-day records the Apple Health import uses.
+const G_SCOPES = ['https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly', 'https://www.googleapis.com/auth/googlehealth.sleep.readonly'];
+const G_DATA = 'https://health.googleapis.com/v4/users/me/dataTypes';
+const G_TOKEN = 'https://oauth2.googleapis.com/token';
+
+function googleRedirect(origin) {
+  return origin.replace(/\/+$/, '') + '/api/google/callback';
+}
+function needGoogleSecrets(env) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) throw new HttpError(500, 'Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to the Worker (Settings → Variables and Secrets), then Deploy.');
+}
+async function googleToken(env, params) {
+  const r = await fetch(G_TOKEN, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: String(env.GOOGLE_CLIENT_ID).trim(), client_secret: String(env.GOOGLE_CLIENT_SECRET).trim(), ...params }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new HttpError(r.status === 400 || r.status === 401 ? 401 : 502, `Google sign-in error: ${j.error_description || j.error || r.status}`);
+    e.google = j.error || '';
+    throw e;
+  }
+  return j;
+}
+async function googleAccess(env) {
+  const g = await env.KV.get('google', 'json');
+  if (!g || !g.refresh) throw new HttpError(409, 'Google Health is not connected');
+  if (g.access && g.accessExp > Date.now() + 60000) return { g, token: g.access };
+  try {
+    const t = await googleToken(env, { grant_type: 'refresh_token', refresh_token: g.refresh });
+    const next = { ...g, access: t.access_token, accessExp: Date.now() + (t.expires_in || 3600) * 1000, needsReconnect: false };
+    if (t.refresh_token) next.refresh = t.refresh_token;
+    await env.KV.put('google', JSON.stringify(next));
+    return { g: next, token: next.access };
+  } catch (e) {
+    if (e.google === 'invalid_grant') {
+      await env.KV.put('google', JSON.stringify({ ...g, needsReconnect: true, access: null, lastError: 'Google sign-in expired. Connect again.' }));
+      throw new HttpError(401, 'Google sign-in expired. Tap Connect again.');
+    }
+    throw e;
+  }
+}
+/** Lists every data point of one type since a civil date, following page tokens. */
+async function googleList(token, type, field, since) {
+  const out = [];
+  let page = '';
+  for (let i = 0; i < 40; i++) {
+    const q = new URLSearchParams({ filter: `${field} >= "${since}"`, pageSize: '1000' });
+    if (page) q.set('pageToken', page);
+    const r = await fetch(`${G_DATA}/${type}/dataPoints?${q}`, { headers: { authorization: 'Bearer ' + token, accept: 'application/json' } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new HttpError(r.status === 401 || r.status === 403 ? 401 : 502, `Google Health ${type}: ${(j.error && j.error.message) || r.status}`);
+    out.push(...(j.dataPoints || []));
+    page = j.nextPageToken;
+    if (!page) break;
+  }
+  return out;
+}
+const gNum = v => (v == null || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+const gSecs = v => gNum(String(v || '').replace(/s$/, '')) || 0;
+/** The local calendar date of a time, using the offset Google gives, else the app's time zone. */
+function gDate(time, offset, tz) {
+  const ms = Date.parse(time);
+  if (!Number.isFinite(ms)) return null;
+  if (offset != null && offset !== '') return new Date(ms + gSecs(offset) * 1000).toISOString().slice(0, 10);
+  return localParts(ms, tz).date;
+}
+/** The payload object inside a data point (e.g. dp.steps, dp.sleep), whatever its key. */
+function gBody(dp) {
+  const k = Object.keys(dp || {}).find(x => x !== 'name' && x !== 'dataSource' && dp[x] && typeof dp[x] === 'object');
+  return k ? dp[k] : {};
+}
+// The Fitbit band is the trusted source. Phone or third-party copies of the same thing are
+// used only on days the band has nothing, so steps and sleep never count twice.
+const gIsBand = dp => (dp.dataSource && dp.dataSource.platform) === 'FITBIT' && (dp.dataSource.recordingMethod || '') !== 'MANUAL';
+function preferBand(points) {
+  const band = points.filter(p => gIsBand(p.dp));
+  return band.length ? band : points;
+}
+
+function googleToDays(raw, tz) {
+  const days = {};
+  const day = d => (days[d] = days[d] || { date: d, source: 'Google Health' });
+  // Steps: sum per local day.
+  const steps = {};
+  for (const dp of raw.steps || []) {
+    const b = gBody(dp);
+    const iv = b.interval || {};
+    const count = gNum(b.count ?? b.steps ?? b.value ?? b.stepCount);
+    const d = gDate(iv.startTime || (b.sampleTime && b.sampleTime.physicalTime), iv.startUtcOffset ?? (b.sampleTime && b.sampleTime.utcOffset), tz);
+    if (d && count != null) (steps[d] = steps[d] || []).push({ dp, count });
+  }
+  for (const [d, list] of Object.entries(steps)) day(d).steps = Math.round(preferBand(list).reduce((a, x) => a + x.count, 0));
+  // Sleep: minutes asleep, counted on the morning you woke up.
+  const sleep = {};
+  for (const dp of raw.sleep || []) {
+    const b = gBody(dp);
+    const iv = b.interval || {};
+    const s = b.summary || {};
+    let mins = gNum(s.minutesAsleep);
+    if (mins == null) mins = (Date.parse(iv.endTime) - Date.parse(iv.startTime)) / 60000 - (gNum(s.minutesAwake) || 0);
+    const d = gDate(iv.endTime, iv.endUtcOffset, tz);
+    if (d && mins > 0) (sleep[d] = sleep[d] || []).push({ dp, mins });
+  }
+  for (const [d, list] of Object.entries(sleep)) day(d).sleep_hours = Math.round((preferBand(list).reduce((a, x) => a + x.mins, 0) / 60) * 100) / 100;
+  // Workouts: every session, with minutes and calories.
+  for (const dp of raw.exercise || []) {
+    const b = gBody(dp);
+    const iv = b.interval || {};
+    const d = gDate(iv.startTime, iv.startUtcOffset, tz);
+    if (!d) continue;
+    const mins = Math.round(gSecs(b.activeDuration) / 60) || Math.round((Date.parse(iv.endTime) - Date.parse(iv.startTime)) / 60000) || 0;
+    const r = day(d);
+    r.workouts = r.workouts || [];
+    r.workouts.push({ id: String(dp.name || '').split('/').pop(), name: b.displayName || 'Workout', type: b.exerciseType || '', start: iv.startTime, minutes: mins, kcal: gNum(b.metricsSummary && b.metricsSummary.caloriesKcal), from: (dp.dataSource && dp.dataSource.application && dp.dataSource.application.packageName) || (dp.dataSource && dp.dataSource.platform) || '' });
+    r.exercise_min = (r.exercise_min || 0) + mins;
+  }
+  return Object.values(days).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** Merges one day into the per-day health record ("hk:" keys). Returns true if it changed. */
+async function putHealthDay(env, rec) {
+  const prev = (await env.KV.get('hk:' + rec.date, 'json')) || {};
+  const merged = { ...prev, ...rec };
+  const { receivedAt: _a, ...cmpPrev } = prev;
+  const { receivedAt: _b, ...cmpNew } = merged;
+  if (JSON.stringify(cmpPrev) === JSON.stringify(cmpNew)) return false;
+  await env.KV.put('hk:' + rec.date, JSON.stringify({ ...merged, receivedAt: Date.now() }), { expirationTtl: 45 * 86400 });
+  return true;
+}
+
+async function googleSync(env, { days = 3 } = {}) {
+  const cfg = (await env.KV.get('config', 'json')) || {};
+  const tz = cfg.tz || 'Australia/Melbourne';
+  const { g, token } = await googleAccess(env);
+  const since = localParts(Date.now() - (days - 1) * 86400000, tz).date;
+  const [steps, sleep, exercise] = await Promise.all([
+    googleList(token, 'steps', 'steps.interval.civil_start_time', since),
+    googleList(token, 'sleep', 'sleep.interval.civil_end_time', since),
+    googleList(token, 'exercise', 'exercise.interval.civil_start_time', since),
+  ]);
+  const recs = googleToDays({ steps, sleep, exercise }, tz).filter(r => r.date >= since);
+  let written = 0;
+  for (const r of recs) if (await putHealthDay(env, r)) written++;
+  const summary = { at: Date.now(), days: recs.length, written, counts: { steps: steps.length, sleep: sleep.length, exercise: exercise.length } };
+  // Keep one raw sample of each type so field names can be checked from the app if a number looks wrong.
+  const sample = { steps: steps[0] || null, sleep: sleep[0] ? { ...sleep[0], sleep: { ...gBody(sleep[0]), stages: undefined, shortAwakenings: undefined } } : null, exercise: exercise[0] || null };
+  await env.KV.put('google', JSON.stringify({ ...g, lastSync: summary, lastError: null, sample }));
+  return { ...summary, records: recs };
+}
+
+/** Called from the cron every minute; actually syncs at most once an hour. */
+async function googleSyncIfDue(env, now) {
+  if (!env.GOOGLE_CLIENT_ID) return;
+  const g = await env.KV.get('google', 'json');
+  if (!g || !g.refresh || g.needsReconnect) return;
+  const last = Math.max((g.lastSync && g.lastSync.at) || 0, g.lastTry || 0);
+  if (now - last < 55 * 60000) return;
+  await env.KV.put('google', JSON.stringify({ ...g, lastTry: now }));
+  try {
+    await googleSync(env);
+  } catch (e) {
+    const cur = (await env.KV.get('google', 'json')) || g;
+    await env.KV.put('google', JSON.stringify({ ...cur, lastError: e.message }));
+  }
+}
+
+function htmlPage(title, msg, ok) {
+  return new Response(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><body style="font:17px -apple-system,system-ui,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh;background:#f4f4f7;color:#111"><div style="max-width:340px;padding:28px;text-align:center"><div style="font-size:52px">${ok ? '✅' : '⚠️'}</div><h2 style="margin:10px 0">${title}</h2><p style="color:#555;line-height:1.45">${msg}</p></div></body>`, { status: ok ? 200 : 400, headers: { 'content-type': 'text/html; charset=utf-8' } });
+}
+
+/** Public (no app token): Google sends the browser here after sign-in. */
+async function googleCallback(env, url) {
+  const esc = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
+  if (url.searchParams.get('error')) return htmlPage('Not connected', `Google said: ${esc(url.searchParams.get('error'))}. Go back to HealthOS and try again.`, false);
+  const state = url.searchParams.get('state') || '';
+  const code = url.searchParams.get('code') || '';
+  if (!env.KV || !state || !(await env.KV.get('gstate:' + state))) return htmlPage('Link expired', 'This sign-in link was already used or is over 10 minutes old. Go back to HealthOS and tap Connect again.', false);
+  await env.KV.delete('gstate:' + state);
+  try {
+    needGoogleSecrets(env);
+    const t = await googleToken(env, { grant_type: 'authorization_code', code, redirect_uri: googleRedirect(url.origin) });
+    if (!t.refresh_token) return htmlPage('Almost', 'Google did not send a long-term key. Go to myaccount.google.com/permissions, remove HealthOS, then tap Connect again.', false);
+    const granted = String(t.scope || '');
+    await env.KV.put('google', JSON.stringify({ refresh: t.refresh_token, access: t.access_token, accessExp: Date.now() + (t.expires_in || 3600) * 1000, refreshExp: t.refresh_token_expires_in ? Date.now() + t.refresh_token_expires_in * 1000 : null, scope: granted, connectedAt: Date.now() }));
+    let note = '';
+    try {
+      const s = await googleSync(env, { days: 14 });
+      note = ` Pulled ${s.days} day(s).`;
+    } catch (e) {
+      note = ` First sync failed (${esc(e.message)}); it will retry within the hour.`;
+    }
+    const missing = G_SCOPES.map(s => s.split('/').pop()).filter(s => !granted.includes(s)).map(s => s.split('.')[1]);
+    return htmlPage('Google Health connected', `HealthOS will now sync your Fitbit steps, sleep and workouts every hour.${note}${missing.length ? ` Not allowed: ${missing.join(', ')}.` : ''} You can close this tab and go back to the app.`, true);
+  } catch (e) {
+    return htmlPage('Not connected', esc(e.message), false);
+  }
+}
+
 function json(env, data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors(env) } });
 }
@@ -799,6 +1003,7 @@ async function handle(request, env) {
   const path = url.pathname.replace(/\/+$/, '');
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(env) });
   if (path === '' || path === '/') return json(env, { app: 'HealthOS worker', ok: true });
+  if (request.method === 'GET' && path === '/api/google/callback') return googleCallback(env, url);
   if (!env.APP_TOKEN) throw new HttpError(500, 'APP_TOKEN secret is not set on the Worker');
   if (!env.KV) throw new HttpError(500, 'KV binding named "KV" is missing');
   const auth = request.headers.get('authorization') || '';
@@ -889,15 +1094,7 @@ async function handle(request, env) {
       const cfg = (await env.KV.get('config', 'json')) || {};
       const records = body && body.data && (body.data.metrics || body.data.workouts) ? haeToDays(body) : [{ ...body, date: /^\d{4}-\d{2}-\d{2}$/.test((body && body.date) || '') ? body.date : localParts(Date.now(), cfg.tz || 'Australia/Melbourne').date }];
       let written = 0;
-      for (const rec of records.slice(-31)) {
-        const prev = (await env.KV.get('hk:' + rec.date, 'json')) || {};
-        const merged = { ...prev, ...rec };
-        const { receivedAt: _a, ...cmpPrev } = prev;
-        const { receivedAt: _b, ...cmpNew } = merged;
-        if (JSON.stringify(cmpPrev) === JSON.stringify(cmpNew)) continue;
-        await env.KV.put('hk:' + rec.date, JSON.stringify({ ...merged, receivedAt: Date.now() }), { expirationTtl: 45 * 86400 });
-        written++;
-      }
+      for (const rec of records.slice(-31)) if (await putHealthDay(env, rec)) written++;
       return json(env, { ok: true, days: records.length, written });
     }
     case 'GET /api/healthkit': {
@@ -908,6 +1105,33 @@ async function handle(request, env) {
         if (v) out.push(v);
       }
       return json(env, out);
+    }
+    case 'POST /api/google/link': {
+      needGoogleSecrets(env);
+      const state = crypto.randomUUID();
+      await env.KV.put('gstate:' + state, '1', { expirationTtl: 600 });
+      const q = new URLSearchParams({ client_id: String(env.GOOGLE_CLIENT_ID).trim(), redirect_uri: googleRedirect(url.origin), response_type: 'code', scope: G_SCOPES.join(' '), access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true', state });
+      return json(env, { ok: true, url: 'https://accounts.google.com/o/oauth2/v2/auth?' + q, redirect: googleRedirect(url.origin) });
+    }
+    case 'GET /api/google/status': {
+      const g = await env.KV.get('google', 'json');
+      return json(env, { ok: true, configured: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET), redirect: googleRedirect(url.origin), connected: !!(g && g.refresh), needsReconnect: !!(g && g.needsReconnect), connectedAt: (g && g.connectedAt) || null, refreshExp: (g && g.refreshExp) || null, lastSync: (g && g.lastSync) || null, lastError: (g && g.lastError) || null, scope: (g && g.scope) || '', sample: url.searchParams.get('sample') ? (g && g.sample) || null : undefined });
+    }
+    case 'POST /api/google/sync': {
+      try {
+        const r = await googleSync(env, { days: Math.min(31, Number((body && body.days) || 3)) });
+        return json(env, { ok: true, ...r });
+      } catch (e) {
+        const g = await env.KV.get('google', 'json');
+        if (g) await env.KV.put('google', JSON.stringify({ ...g, lastError: e.message }));
+        throw e;
+      }
+    }
+    case 'POST /api/google/disconnect': {
+      const g = await env.KV.get('google', 'json');
+      if (g && g.refresh) await fetch('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: g.refresh }) }).catch(() => {});
+      await env.KV.delete('google');
+      return json(env, { ok: true });
     }
     case 'POST /api/video': {
       // A cooking video (or photo) sent from the phone, raw bytes. Gemini watches it.
@@ -940,7 +1164,8 @@ export default {
   },
   async scheduled(event, env, ctx) {
     ctx.waitUntil(runSchedule(env, event.scheduledTime));
+    ctx.waitUntil(googleSyncIfDue(env, event.scheduledTime));
   },
   // Exposed for the test-suite only.
-  _test: { aiTask, tiktokItem, tiktokMedia, recipeFromMedia, geminiUpload, upcoming, haeToDays, TASKS, dueReminders, encryptPayload, vapidJwt, createVapidKeys, localParts, extractJsonLdRecipe, splitOneoffs, parseJsonLoose, b64urlDecode, b64urlEncode, handle },
+  _test: { googleToDays, googleSync, googleSyncIfDue, googleCallback, aiTask, tiktokItem, tiktokMedia, recipeFromMedia, geminiUpload, upcoming, haeToDays, TASKS, dueReminders, encryptPayload, vapidJwt, createVapidKeys, localParts, extractJsonLdRecipe, splitOneoffs, parseJsonLoose, b64urlDecode, b64urlEncode, handle },
 };

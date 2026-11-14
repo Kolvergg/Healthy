@@ -7,7 +7,7 @@ import { esc, icon, sheet, liveSheet, toast, confirmSheet, download, toggleHtml,
 import { register, rerender } from './state.js';
 import { afcdImport } from './food.js';
 
-export const APP_VERSION = '2.1.0';
+export const APP_VERSION = '2.2.0';
 let connMsg = '';
 const ago = t => (t ? new Date(t).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never');
 const mins = t => {
@@ -65,6 +65,7 @@ const ROWS = [
     ['targets', 'Nutrition priorities', 'nutrition', 'var(--sugar)'],
   ],
   [
+    ['google', 'Google Health (Fitbit)', 'trend', 'var(--water)'],
     ['apple', 'Apple Health', 'heart', 'var(--satfat)'],
     ['ai', 'AI & usage', 'sparkle', 'var(--protein)'],
     ['calendar', 'Calendar reminders', 'planner', 'var(--water)'],
@@ -87,6 +88,7 @@ export async function render() {
     medtimes: `${s.medSlots.length}`,
     targets: `${s.targets.length}`,
     apple: (await db.kvGet('cache:healthPulledAt', null)) ? 'Connected' : '',
+    google: ((await db.kvGet('cache:google', null)) || {}).connected ? 'Connected' : '',
     ai: usage && usage.month === core.today().slice(0, 7) ? `${usage.calls} this month` : '',
     profile: s.theme[0].toUpperCase() + s.theme.slice(1),
     about: APP_VERSION,
@@ -133,6 +135,33 @@ const SECTIONS = {
     ${s.targets.map((t, i) => `<div class="item-card"><div class="row between"><b>${N.NUTRIENT[t.key].label}</b><button class="link small" data-act="target-del" data-i="${i}">Remove</button></div><div class="fields three" style="margin-top:8px"><label class="field"><span>Type</span><select class="input sm" data-t="${i}" data-k="kind"><option value="min" ${t.kind === 'min' ? 'selected' : ''}>At least</option><option value="max" ${t.kind === 'max' ? 'selected' : ''}>At most</option></select></label><label class="field"><span>${N.NUTRIENT[t.key].unit}/day</span><input class="input sm num" type="number" data-t="${i}" data-k="value" value="${t.value}"></label><label class="field"><span>Weight</span><input class="input sm num" type="number" min="0" max="5" data-t="${i}" data-k="weight" value="${t.weight}"></label></div><div class="row between" style="margin-top:8px"><span class="small ink2">Show on Home & diary</span>${toggleHtml('t-show-' + i, t.show, `data-t="${i}" data-k="show"`)}</div></div>`).join('')}
     <div class="row" style="gap:8px;margin-top:12px"><select class="input sm grow" id="st-addt">${N.NUTRIENTS.filter(n => !s.targets.some(t => t.key === n.key)).map(n => `<option value="${n.key}">${n.label}</option>`).join('')}</select><button class="btn sm" data-act="target-add">Add</button></div>
     <button class="btn primary block" style="margin-top:12px" data-act="target-save">Save priorities</button>`;
+  }],
+  google: ['Google Health (Fitbit)', async () => {
+    let st = (await db.kvGet('cache:google', null)) || null;
+    let err = '';
+    try {
+      st = await api.google.status();
+      await db.kvSet('cache:google', st, { silent: true });
+    } catch (e) {
+      err = /Not found/i.test(e.message) ? 'Your Worker is on old code. Update it first (Settings → Worker setup & update).' : e.message;
+    }
+    const last = st && st.lastSync;
+    const left = st && st.refreshExp ? Math.ceil((st.refreshExp - Date.now()) / 86400000) : null;
+    const status = !st
+      ? ''
+      : st.connected && !st.needsReconnect
+        ? `<div class="notice good small"><b>Connected.</b> Syncs every hour. Last sync ${ago(last && last.at)}${last ? ` · ${last.counts.steps} step, ${last.counts.sleep} sleep, ${last.counts.exercise} workout records` : ''}.${left != null && left < 8 ? ` Google's test mode makes you sign in again weekly: ${left > 0 ? `${left} day(s) left` : 'due now'}.` : ''}</div>`
+        : st.needsReconnect
+          ? '<div class="notice bad small"><b>Sign-in expired.</b> Tap Connect again.</div>'
+          : '';
+    return `${err ? `<div class="notice bad small" style="margin-bottom:12px">${esc(err)}</div>` : ''}${status}
+    ${st && st.lastError && st.connected ? `<div class="notice warn small" style="margin-top:10px">Last error: ${esc(st.lastError)}</div>` : ''}
+    <div class="card stack" style="margin-top:12px"><p class="small ink2" style="margin:0">Pulls your Fitbit steps, sleep and workouts (including ones other apps like Hevy share) from Google Health, straight into the Health tab.</p>
+    ${st && !st.configured ? '<div class="notice warn small">Add <b>GOOGLE_CLIENT_ID</b> and <b>GOOGLE_CLIENT_SECRET</b> to the Worker first (Cloudflare → your Worker → Settings → Variables and Secrets).</div>' : ''}
+    <button class="btn primary block" data-act="g-connect">${icon('link')} ${st && st.connected ? 'Connect again' : 'Connect Google Health'}</button>
+    ${st && st.connected ? '<div class="grid2"><button class="btn" data-act="g-sync">Sync now</button><button class="btn" data-act="g-week">Pull last 30 days</button></div>' : ''}</div>
+    ${st && st.redirect ? `<div class="card stack" style="margin-top:12px"><div class="small ink2">This exact address must be in your Google OAuth client under <b>Authorized redirect URIs</b>:</div><div class="row" style="gap:8px"><input class="input sm grow" readonly value="${esc(st.redirect)}"><button class="btn sm" data-act="st-copy" data-v="${esc(st.redirect)}">Copy</button></div></div>` : ''}
+    ${st && st.connected ? '<div class="row between" style="margin-top:14px"><button class="link small" data-act="g-raw">Show raw data (for fixing)</button><button class="link small" data-act="g-off" style="color:var(--bad)">Disconnect</button></div>' : ''}`;
   }],
   apple: ['Apple Health', async () => {
     const s = await core.getSettings();
@@ -181,20 +210,41 @@ const SECTIONS = {
   worker: ['Worker setup & update', async () => {
     const st = await db.kvGet('cache:status', null);
     const wv = await db.kvGet('cache:workerVersion', null);
-    const needCode = !wv || wv.v < 4;
+    const needCode = !wv || wv.v < 5;
     const needCron = st && !st.error && !st.cronOk;
-    return `${needCode ? `<div class="notice warn small" style="margin-bottom:12px"><b>Update the Worker code.</b> Your Worker runs version ${wv ? wv.v : '?'}; this app expects version 4 (needed for TikTok and video recipes).</div>` : ''}${needCron ? `<div class="notice bad small" style="margin-bottom:12px"><b>The reminder engine isn't running.</b> Test notifications work because the app asks for them directly; scheduled ones need the Worker to wake up every minute, which only happens with a Cron Trigger.</div>` : ''}
+    return `${needCode ? `<div class="notice warn small" style="margin-bottom:12px"><b>Update the Worker code.</b> Your Worker runs version ${wv ? wv.v : '?'}; this app expects version 5 (needed for Google Health, TikTok and video recipes).</div>` : ''}${needCron ? `<div class="notice bad small" style="margin-bottom:12px"><b>The reminder engine isn't running.</b> Test notifications work because the app asks for them directly; scheduled ones need the Worker to wake up every minute, which only happens with a Cron Trigger.</div>` : ''}
     <div class="card stack"><div class="h3">1 · Update the code (only when asked)</div>
     <ol class="small ink2" style="margin:0;padding-left:18px;line-height:1.55"><li>Tap <b>Copy Worker code</b>.</li><li>dash.cloudflare.com → Workers & Pages → your worker → <b>Edit code</b>.</li><li>Select all, paste, tap <b>Deploy</b>.</li></ol>
     <button class="btn primary block" data-act="st-copy-worker">${icon('copy')} Copy Worker code</button></div>
     <div class="card stack" style="margin-top:12px"><div class="h3">2 · Make sure the Cron Trigger exists</div>
     <ol class="small ink2" style="margin:0;padding-left:18px;line-height:1.55"><li>Your worker → <b>Settings</b> → <b>Trigger events</b> (or Triggers) → <b>Add</b> → <b>Cron Triggers</b>.</li><li>Choose <b>Every minute</b> — the expression is <code>* * * * *</code>. Save.</li><li>Come back here and wait a minute: Settings shows “Reminder engine running”.</li></ol></div>
-    <div class="card stack" style="margin-top:12px"><div class="h3">Required settings on the Worker</div><div class="small ink2">Variables and Secrets: <b>APP_TOKEN</b> (secret), <b>GEMINI_API_KEY</b> (secret), <b>VAPID_SUBJECT</b> (mailto:you@…). Bindings: KV namespace with variable name <b>KV</b>. Trigger: cron <b>* * * * *</b>.</div></div>`;
+    <div class="card stack" style="margin-top:12px"><div class="h3">Required settings on the Worker</div><div class="small ink2">Variables and Secrets: <b>APP_TOKEN</b> (secret), <b>GEMINI_API_KEY</b> (secret), <b>VAPID_SUBJECT</b> (mailto:you@…). For Google Health: <b>GOOGLE_CLIENT_ID</b> and <b>GOOGLE_CLIENT_SECRET</b> (secrets). Bindings: KV namespace with variable name <b>KV</b>. Trigger: cron <b>* * * * *</b>.</div></div>`;
   }],
   about: ['About', async () => `<div class="card stack small ink2"><div>HealthOS ${APP_VERSION}. Your data lives on this device (IndexedDB). AI requests and reminders go through your own Cloudflare Worker; nothing is sent anywhere else.</div>
     <div>Nutrition numbers come from AFCD, labels you confirmed, or foods you entered. Anything AI-estimated is marked <span class="badge unverified">Unverified</span>.</div>
     <button class="btn block" data-act="st-update">Check for app update</button></div>`],
 };
+
+async function googleRun(b, days) {
+  const label = b && b.textContent;
+  if (b) {
+    b.disabled = true;
+    b.textContent = 'Syncing…';
+  }
+  try {
+    const r = await api.google.sync(days);
+    toast(`Synced ${r.days} day(s) from Google Health`);
+    await db.kvSet('cache:google', await api.google.status().catch(() => null));
+  } catch (e) {
+    toast(e.message);
+  } finally {
+    if (b) {
+      b.disabled = false;
+      b.textContent = label;
+    }
+    rerender();
+  }
+}
 
 function openSection(k) {
   const [title, fn] = SECTIONS[k];
@@ -486,6 +536,41 @@ register({
     for (const st of Object.keys(db.STORES)) await db.clear(st);
     core.invalidateSettings();
     toast('Erased');
+    rerender();
+  },
+  'g-connect': async () => {
+    try {
+      await api.google.connect();
+      toast('Finish signing in with Google, then come back here');
+      const back = async () => {
+        if (document.visibilityState !== 'visible') return;
+        document.removeEventListener('visibilitychange', back);
+        await api.pullHealth().catch(() => {});
+        await db.kvSet('cache:google', await api.google.status().catch(() => null));
+        rerender();
+      };
+      document.addEventListener('visibilitychange', back);
+    } catch (e) {
+      toast(e.message);
+    }
+  },
+  'g-sync': async b => googleRun(b, 3),
+  'g-week': async b => googleRun(b, 30),
+  'g-raw': async () => {
+    try {
+      const r = await api.google.sample();
+      const text = JSON.stringify(r.sample || {}, null, 2);
+      await navigator.clipboard.writeText(text).catch(() => {});
+      sheet({ title: 'Raw Google data (copied)', body: `<pre class="tiny" style="white-space:pre-wrap;word-break:break-all;margin:0">${esc(text)}</pre>` });
+    } catch (e) {
+      toast(e.message);
+    }
+  },
+  'g-off': async () => {
+    if (!(await confirmSheet('Disconnect Google Health? Data already pulled stays.', { ok: 'Disconnect', danger: true }))) return;
+    await api.google.disconnect().catch(() => {});
+    await db.kvSet('cache:google', null);
+    toast('Disconnected');
     rerender();
   },
   'st-hk': async () => {

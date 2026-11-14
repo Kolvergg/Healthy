@@ -294,7 +294,7 @@ export async function pullHealth() {
     const rec = {
       id: r.date,
       date: r.date,
-      source: 'Apple Health',
+      source: r.source || 'Apple Health',
       steps: n(r.steps),
       distanceKm: n(r.distance_km ?? r.distance),
       exerciseMin: n(r.exercise_min ?? r.exercise),
@@ -309,7 +309,14 @@ export async function pullHealth() {
     if (rec.weightKg) await db.put('weight', { id: 'hk-' + r.date, date: r.date, kg: rec.weightKg, source: 'Apple Health' }, { silent: true });
     if (rec.sleepHours) {
       const id = 'hk-' + r.date;
-      await db.put('sleep', { id, date: r.date, hours: rec.sleepHours, source: 'Apple Health' }, { silent: true });
+      await db.put('sleep', { id, date: r.date, hours: rec.sleepHours, source: rec.source }, { silent: true });
+    }
+    // Workouts recorded by the band or other apps (e.g. Hevy) arrive via Google Health.
+    for (const w of r.workouts || []) {
+      if (!w.id) continue;
+      const id = 'g-' + w.id;
+      const old = await db.get('workouts', id);
+      await db.put('workouts', { exercises: [], notes: '', ...(old || {}), id, date: r.date, name: (old && old.name) || w.name, minutes: w.minutes, kcal: w.kcal, from: w.from, source: 'Google Health' }, { silent: true });
     }
     count++;
   }
@@ -317,3 +324,23 @@ export async function pullHealth() {
   await db.kvSet('cache:healthPulledAt', Date.now(), { silent: true });
   return count;
 }
+
+// ---------------- Google Health (Fitbit) via the Worker ----------------
+export const google = {
+  status: () => call('/api/google/status'),
+  sample: () => call('/api/google/status?sample=1'),
+  /** Opens Google's sign-in in Safari; the Worker finishes the sign-in and starts syncing. */
+  async connect() {
+    if ((await workerVersion(true)) < 5) throw new Error(UPDATE_WORKER.replace('version 4', 'version 5'));
+    const r = await call('/api/google/link', { method: 'POST', body: {} });
+    const w = window.open(r.url, '_blank');
+    if (!w) location.href = r.url;
+    return r;
+  },
+  async sync(days = 3) {
+    const r = await call('/api/google/sync', { method: 'POST', body: { days }, timeout: 90000 });
+    await pullHealth();
+    return r;
+  },
+  disconnect: () => call('/api/google/disconnect', { method: 'POST', body: {} }),
+};
