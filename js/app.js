@@ -314,8 +314,7 @@ async function boot() {
     api.syncConfig();
     api.syncDay();
     api.maybeAutoBackup();
-    const pulled = await db.kvGet('cache:healthPulledAt', 0);
-    if (Date.now() - (pulled || 0) > 3 * 3600 * 1000) api.pullHealth().catch(() => {});
+    api.freshHealth().catch(() => {});
   };
   document.addEventListener('visibilitychange', onVisible);
   setInterval(() => {

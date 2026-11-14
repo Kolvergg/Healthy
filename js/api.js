@@ -309,7 +309,7 @@ export async function pullHealth() {
     if (rec.weightKg) await db.put('weight', { id: 'hk-' + r.date, date: r.date, kg: rec.weightKg, source: 'Apple Health' }, { silent: true });
     if (rec.sleepHours) {
       const id = 'hk-' + r.date;
-      await db.put('sleep', { id, date: r.date, hours: rec.sleepHours, source: rec.source }, { silent: true });
+      await db.put('sleep', { id, date: r.date, hours: rec.sleepHours, bed: r.sleep_bed || undefined, wake: r.sleep_wake || undefined, source: rec.source }, { silent: true });
     }
     // Workouts recorded by the band or other apps (e.g. Hevy) arrive via Google Health.
     for (const w of r.workouts || []) {
@@ -323,6 +323,33 @@ export async function pullHealth() {
   db.bus.dispatchEvent(new CustomEvent('change', { detail: { store: 'health' } }));
   await db.kvSet('cache:healthPulledAt', Date.now(), { silent: true });
   return count;
+}
+
+/**
+ * Keeps synced health data current when the app opens: asks the Worker to pull from Google
+ * Health if that's connected (at most every 10 min), otherwise just reads what Apple Health
+ * sent (every 15 min). The Worker also syncs hourly on its own.
+ */
+let freshRunning = null;
+export function freshHealth({ force = false } = {}) {
+  if (freshRunning) return freshRunning;
+  freshRunning = (async () => {
+    if (!(await configured())) return;
+    const g = await db.kvGet('cache:google', null);
+    const last = await db.kvGet('cache:googleSyncAt', 0);
+    if (g && g.connected && !g.needsReconnect && (force || Date.now() - (last || 0) > 10 * 60000)) {
+      await db.kvSet('cache:googleSyncAt', Date.now(), { silent: true });
+      try {
+        await google.sync(2);
+        return;
+      } catch {
+        /* fall through to a plain pull */
+      }
+    }
+    const pulled = await db.kvGet('cache:healthPulledAt', 0);
+    if (force || Date.now() - (pulled || 0) > 15 * 60000) await pullHealth();
+  })().finally(() => (freshRunning = null));
+  return freshRunning;
 }
 
 // ---------------- Google Health (Fitbit) via the Worker ----------------

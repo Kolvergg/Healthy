@@ -6,7 +6,7 @@ import * as api from './api.js';
 import { esc, icon, sheet, liveSheet, toast, confirmSheet, promptSheet, ring, chart, bar, daychips, readDays, toggleHtml, pageHead, glassBtn, weekStrip } from './ui.js';
 import { state, register, rerender, push } from './state.js';
 
-const SUBS = [['water', 'Water', 'drop', 'var(--water)'], ['meds', 'Medication', 'pill', 'var(--meds)'], ['sleep', 'Sleep', 'moon', 'var(--sleep)'], ['body', 'Body', 'scale', 'var(--body)'], ['workouts', 'Workouts', 'dumbbell', 'var(--workout)'], ['journal', 'Journal', 'note', 'var(--journal)']];
+const SUBS = [['water', 'Water', 'drop', 'var(--water)'], ['meds', 'Medication', 'pill', 'var(--meds)'], ['sleep', 'Sleep', 'moon', 'var(--sleep)'], ['body', 'Body', 'scale', 'var(--body)'], ['workouts', 'Activity', 'steps', 'var(--workout)'], ['journal', 'Journal', 'note', 'var(--journal)']];
 const SUB = Object.fromEntries(SUBS.map(x => [x[0], x]));
 
 export async function render() {
@@ -33,7 +33,8 @@ async function overview() {
   const wk = (await db.all('workouts')).filter(x => x.date >= weekStart).length;
   const planned = (await db.all('templates')).reduce((a, x) => a + (x.days || []).length, 0);
   const j = (await db.all('journal')).sort((a, b) => b.date.localeCompare(a.date))[0];
-  const hk = (await db.all('health')).sort((a, b) => b.date.localeCompare(a.date))[0];
+  const hkToday = await db.get('health', t);
+  const stepsToday = hkToday && hkToday.steps != null ? Math.round(hkToday.steps) : null;
   const tile = (k, val, sub, extra = '') => {
     const [, name, ic, color] = SUB[k];
     return `<button class="tile" data-act="health-open" data-v="${k}"><div class="top"><span class="name"><span class="ico" style="background:${color};width:28px;height:28px;border-radius:9px">${icon(ic)}</span>${name}</span></div>${icon('chevR', 'chev')}<div class="val num">${val}</div>${extra}<div class="sub">${sub}</div></button>`;
@@ -43,13 +44,15 @@ async function overview() {
     ${tile('water', `${(water / 1000).toFixed(2).replace(/0$/, '')}<small> / ${(s.water.target / 1000).toFixed(1)} L</small>`, water >= s.water.target ? 'Target reached' : `${Math.max(0, s.water.target - water).toLocaleString('en-AU')} ml to go`, bar(water / s.water.target, 'var(--water)'))}
     ${tile('meds', req.length ? `${taken}<small> / ${req.length} taken</small>` : '–', nextMed ? `Next: ${esc(nextMed.slot.name)} ${nextMed.time}` : req.length ? 'All done today' : 'Add your medications', req.length ? bar(taken / req.length, 'var(--meds)') : '')}
     ${tile('sleep', hrs ? `${hrs.toFixed(1)}<small> h</small>` : '–', hrs ? 'Last night' : `Bed tonight ${s.sleep.nights[core.scheduleDay(s, t)].bed}`)}
-    ${tile('body', w ? `${w.kg.toFixed(1)}<small> kg</small>` : '–', w ? core.relDay(w.date) : hk && hk.steps ? `${Math.round(hk.steps).toLocaleString('en-AU')} steps` : 'Log weight')}
-    ${tile('workouts', `${wk}<small>${planned ? ` / ${planned}` : ''} this week</small>`, 'Plans, history, progress')}
+    ${tile('body', w ? `${w.kg.toFixed(1)}<small> kg</small>` : '–', w ? core.relDay(w.date) : 'Log weight')}
+    ${stepsToday != null
+      ? tile('workouts', `${stepsToday.toLocaleString('en-AU')}<small> steps</small>`, `${wk} workout${wk === 1 ? '' : 's'} this week`, bar(stepsToday / (s.activity.stepGoal || 8000), 'var(--workout)'))
+      : tile('workouts', `${wk}<small>${planned ? ` / ${planned}` : ''} workouts</small>`, 'This week')}
     ${tile('journal', j && j.date === t ? `${j.energy || '–'}<small> energy</small>` : '–', j ? `Last: ${core.relDay(j.date)}` : 'Energy, mood, migraines')}
-  </div>
-  ${hk ? `<div class="section-label">Apple Health</div><div class="card"><div class="grid3"><div class="stat"><div class="k">Steps</div><div class="v num">${hk.steps != null ? Math.round(hk.steps).toLocaleString('en-AU') : '–'}</div><div class="d">${core.relDay(hk.date)}</div></div><div class="stat"><div class="k">Exercise</div><div class="v num">${hk.exerciseMin != null ? Math.round(hk.exerciseMin) : '–'}</div><div class="d">minutes</div></div><div class="stat"><div class="k">Resting HR</div><div class="v num">${hk.restingHr != null ? Math.round(hk.restingHr) : '–'}</div><div class="d">bpm</div></div></div></div>` : ''}`;
+  </div>`;
 }
 
+const imported = l => String(l.id || '').startsWith('hk-');
 const lastNDays = (n, end = core.today()) => Array.from({ length: n }, (_, i) => core.addDays(end, i - n + 1));
 const shortLabel = d => core.parseYmd(d).toLocaleDateString('en-AU', { weekday: 'narrow' });
 const dayNum = d => String(core.parseYmd(d).getDate());
@@ -227,7 +230,7 @@ async function renderSleep() {
   const s = await core.getSettings();
   const days = lastNDays(14);
   const logs = await db.range('sleep', days[0], days[13]);
-  const pick = d => logs.find(l => l.date === d && l.source !== 'Apple Health') || logs.find(l => l.date === d);
+  const pick = d => logs.find(l => l.date === d && !imported(l)) || logs.find(l => l.date === d);
   const hours = days.map(d => {
     const l = pick(d);
     if (!l) return null;
@@ -245,7 +248,7 @@ async function renderSleep() {
   <div class="row" style="gap:8px;margin-top:14px"><button class="btn primary grow" data-act="sleep-log">Log last night</button><button class="btn" data-act="sleep-schedule">Schedule</button></div></div>
   <div class="section-label">Last 14 nights</div><div class="card">${chart(days.map((d, i) => ({ label: dayNum(d), value: hours[i], tip: hours[i] == null ? `${core.relDay(d)}: not logged` : `${core.relDay(d)}: ${hours[i].toFixed(1)} h` })), { kind: 'bar', color: 'var(--sleep)', target, fmt: v => v.toFixed(0) })}
   <div class="grid3" style="margin-top:12px"><div class="stat"><div class="k">7-day avg</div><div class="v num">${avg ? avg.toFixed(1) : '—'}</div><div class="d">hours</div></div><div class="stat"><div class="k">Bedtime spread</div><div class="v num">${sd == null ? '—' : '±' + Math.round(sd)}</div><div class="d">minutes (SD)</div></div><div class="stat"><div class="k">Logged</div><div class="v num">${hours.filter(h => h != null).length}/14</div><div class="d">nights</div></div></div></div>
-  <div class="section-label">Recent</div><div class="card flush"><div class="list">${recent.length ? recent.map(l => `<div class="li tap" data-act="sleep-log" data-id="${l.id}"><div class="main"><div class="t">${core.relDay(l.date)}</div><div class="s">${l.bed ? `${l.bed} → ${l.wake} · ` : ''}${(l.hours ?? N.sleepMinutes(l.bed, l.wake) / 60).toFixed(1)} h${l.quality ? ` · quality ${l.quality}/5` : ''}</div></div>${l.source === 'Apple Health' ? '<span class="badge apple">Apple Health</span>' : ''}</div>`).join('') : '<div class="empty">No sleep logged yet.</div>'}</div></div>
+  <div class="section-label">Recent</div><div class="card flush"><div class="list">${recent.length ? recent.map(l => `<div class="li tap" data-act="sleep-log" data-id="${l.id}"><div class="main"><div class="t">${core.relDay(l.date)}</div><div class="s">${l.bed ? `${l.bed} → ${l.wake} · ` : ''}${(l.hours ?? N.sleepMinutes(l.bed, l.wake) / 60).toFixed(1)} h${l.quality ? ` · quality ${l.quality}/5` : ''}</div></div>${imported(l) ? `<span class="badge apple">${esc(l.source === 'Google Health' ? 'Fitbit' : l.source || 'Synced')}</span>` : ''}</div>`).join('') : '<div class="empty">No sleep logged yet.</div>'}</div></div>
   <p class="tiny muted" style="margin:14px 6px">For waking up, use the iPhone Clock alarm — web notifications can't play alarm sounds or break through Silent mode.</p>`;
 }
 
@@ -259,8 +262,8 @@ async function sleepLog(id) {
     title: 'Log sleep',
     body: `<label class="field"><span>Morning of</span><input class="input" type="date" id="sl-date" value="${l.date}"></label><div class="fields two" style="margin-top:12px"><label class="field"><span>Went to bed</span><input class="input" type="time" id="sl-bed" value="${l.bed || ''}"></label><label class="field"><span>Woke up</span><input class="input" type="time" id="sl-wake" value="${l.wake || ''}"></label></div>
     <label class="field" style="margin-top:12px"><span>Quality</span><div class="seg" id="sl-q">${[1, 2, 3, 4, 5].map(q => `<button class="${(l.quality || 3) === q ? 'on' : ''}" data-q="${q}">${q}</button>`).join('')}</div></label>
-    <label class="field" style="margin-top:12px"><span>Notes</span><input class="input" id="sl-notes" value="${esc(l.notes || '')}"></label>${l.source === 'Apple Health' ? '<p class="small muted">Imported from Apple Health. Saving creates a manual entry, which takes priority.</p>' : ''}`,
-    foot: `${existing && existing.source !== 'Apple Health' ? '<button class="btn danger" id="sl-del">Delete</button>' : ''}<button class="btn primary" id="sl-save">Save</button>`,
+    <label class="field" style="margin-top:12px"><span>Notes</span><input class="input" id="sl-notes" value="${esc(l.notes || '')}"></label>${imported(l) ? `<p class="small muted">Synced from ${esc(l.source || 'your tracker')}. Saving creates a manual entry, which takes priority.</p>` : ''}`,
+    foot: `${existing && !imported(existing) ? '<button class="btn danger" id="sl-del">Delete</button>' : ''}<button class="btn primary" id="sl-save">Save</button>`,
   });
   let q = l.quality || 3;
   s.body.querySelectorAll('[data-q]').forEach(b => (b.onclick = () => {
@@ -340,14 +343,32 @@ export function overloadHint(last, target) {
 }
 
 async function renderWorkouts() {
+  const st = await core.getSettings();
+  const goal = st.activity.stepGoal || 8000;
   const templates = await db.all('templates');
   const hist = (await db.all('workouts')).sort((a, b) => b.date.localeCompare(a.date));
   const wd = core.weekday(core.today());
   const weekStart = core.startOfWeek(core.today());
   const thisWeek = hist.filter(w => w.date >= weekStart).length;
   const exNames = [...new Set(hist.flatMap(w => (w.exercises || []).map(e => e.name)))].sort();
-  return `<div class="card"><div class="row between"><div><div class="eyebrow">This week</div><div class="big-num num">${thisWeek}</div><div class="small muted">workouts logged</div></div><button class="btn sm primary" data-act="workout-start">${icon('plus')} Log workout</button></div></div>
-  <div class="section-label">Plans</div>
+  const days = lastNDays(14);
+  const hk = Object.fromEntries((await db.range('health', days[0], days[13])).map(h => [h.date, h]));
+  const steps = days.map(d => (hk[d] && hk[d].steps != null ? Math.round(hk[d].steps) : null));
+  const today = steps[13];
+  const known = steps.filter(v => v != null);
+  const avg = known.length ? Math.round(N.mean(steps.slice(-7).filter(v => v != null)) || 0) : null;
+  const hit = known.filter(v => v >= goal).length;
+  const h = hk[days[13]] || {};
+  const activity = known.length
+    ? `<div class="card"><div class="hero">${ring((today || 0) / goal, { size: 118, stroke: 11, color: 'var(--workout)', inner: `<div class="num bold" style="font-size:22px">${today != null ? today.toLocaleString('en-AU') : '–'}</div><div class="tiny muted">steps today</div>` })}
+      <div class="grow stack" style="gap:10px"><div class="stat"><div class="k">7-day average</div><div class="v num">${avg != null ? avg.toLocaleString('en-AU') : '–'}</div></div>
+      <button class="link small" data-act="step-goal" style="text-align:left">Goal ${goal.toLocaleString('en-AU')} · change</button></div></div>
+      <div style="margin-top:14px">${chart(days.map((d, i) => ({ label: dayNum(d), value: steps[i], tip: steps[i] == null ? `${core.relDay(d)}: no data` : `${core.relDay(d)}: ${steps[i].toLocaleString('en-AU')} steps` })), { kind: 'bar', color: 'var(--workout)', target: goal, height: 120, fmt: v => (v >= 1000 ? Math.round(v / 1000) + 'k' : String(Math.round(v))) })}</div>
+      <div class="small muted" style="margin-top:8px">Goal reached ${hit} of the last ${known.length} day${known.length === 1 ? '' : 's'}${h.restingHr != null ? ` · resting HR ${Math.round(h.restingHr)} bpm` : ''}${h.source ? ` · from ${esc(h.source === 'Google Health' ? 'Fitbit' : h.source)}` : ''}</div></div>`
+    : `<div class="card"><div class="row" style="gap:12px"><span class="ico" style="background:var(--workout);width:40px;height:40px;border-radius:12px">${icon('steps')}</span><div class="grow"><div class="bold">Steps</div><div class="small muted">Connect your Fitbit or Apple Health to see daily steps here.</div></div><button class="btn sm" data-act="go-settings">Connect</button></div></div>`;
+  return `${activity}
+  <div class="section-label row between"><span>Workouts <span class="small muted" style="font-weight:500">· ${thisWeek} this week</span></span><button class="btn sm primary" data-act="workout-start">${icon('plus')} Log</button></div>
+  <div class="small muted" style="margin:-4px 6px 8px">Plans</div>
   <div class="card flush"><div class="list">${templates.length ? templates.map(t => `<div class="li"><div class="main tap" data-act="template-edit" data-id="${t.id}"><div class="t">${esc(t.name)} ${(t.days || []).includes(wd) ? '<span class="badge good">Today</span>' : ''}</div><div class="s">${(t.days || []).map(d => core.DAY_SHORT[d]).join(' ')}${t.time ? ' · ' + t.time : ''} · ${(t.exercises || []).length} exercises</div></div><button class="btn sm" data-act="workout-start" data-id="${t.id}">Start</button></div>`).join('') : '<div class="empty">Create a plan (e.g. Push, Pull, Legs) with days and an optional reminder time.</div>'}</div></div>
   <div class="section-label row between"><span>History</span>${exNames.length ? '<button class="link" data-act="exercise-library">Exercises</button>' : ''}</div><div class="card flush"><div class="list">${hist.length ? hist.slice(0, 6).map(w => `<div class="li tap" data-act="workout-open" data-id="${w.id}"><div class="main"><div class="t">${esc(w.name || 'Workout')}</div><div class="s">${core.relDay(w.date)} · ${w.source && !(w.exercises || []).length ? `${w.minutes || 0} min${w.kcal ? ` · ${w.kcal} kcal` : ''} · ${esc(/hevy/i.test(w.from || '') ? 'Hevy' : /FITBIT/.test(w.from || '') ? 'Fitbit' : w.source)}` : `${(w.exercises || []).length} exercises · ${(w.exercises || []).reduce((a, e) => a + (e.sets || []).length, 0)} sets`}</div></div></div>`).join('') : '<div class="empty">No workouts yet.</div>'}</div></div>
 `;
@@ -581,6 +602,18 @@ register({
   },
   'weight-del': el => db.del('weight', el.dataset.id),
   'workout-start': el => workoutLogger(el.dataset.id),
+  'step-goal': async () => {
+    const s = await core.getSettings();
+    const v = await promptSheet('Daily step goal', { label: 'Steps', value: String(s.activity.stepGoal || 8000), type: 'number', ok: 'Save' });
+    const n = Math.round(Number(String(v || '').replace(/[^0-9.]/g, '')));
+    if (!n || n < 500 || n > 100000) return v == null ? null : toast('Enter a goal between 500 and 100,000');
+    await core.saveSettings({ activity: { stepGoal: n } });
+    rerender();
+  },
+  'go-settings': async () => {
+    await push('settings');
+    (await import('./settings.js')).openSection('google');
+  },
   'workout-open': async el => {
     const w = await db.get('workouts', el.dataset.id);
     workoutLogger(w.templateId, w.id);

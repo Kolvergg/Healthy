@@ -36,6 +36,7 @@ const P = {
   scale: '<path d="M5 20h14l-1.5-12h-11Z"/><circle cx="12" cy="5" r="2"/>',
   note: '<path d="M6 3.5h9l4 4V20a.5.5 0 0 1-.5.5h-12A.5.5 0 0 1 6 20Z"/><path d="M9 11h6M9 15h6"/>',
   more: '<circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/>',
+  steps: '<path d="M8.5 3.5c1.8 0 2.7 1.9 2.4 4.4l-.4 3.3c-.1.9-.9 1.6-1.8 1.5l-1.5-.2c-.9-.1-1.5-.9-1.4-1.8l.4-3.4C6.4 5.4 7 3.5 8.5 3.5Z"/><path d="M7.2 15.4l2.6.3-.3 2.3a1.3 1.3 0 0 1-2.6-.3Z"/><path d="M15.5 6.5c1.5 0 2.1 1.7 1.9 3.9l-.3 2.6c-.1.8-.8 1.3-1.6 1.2l-1.3-.1c-.8-.1-1.3-.8-1.2-1.6l.3-2.6c.2-1.8.8-3.4 2.2-3.4Z"/><path d="M13.6 16.4l2.3.2-.2 2a1.15 1.15 0 0 1-2.3-.2Z"/>',
   trend: '<path d="M3 17 9 11l4 4 8-8"/><path d="M15 7h6v6"/>',
   list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/>',
   repeat: '<path d="M17 2.5 20.5 6 17 9.5"/><path d="M3.5 11V9.5A3.5 3.5 0 0 1 7 6h13.5M7 21.5 3.5 18 7 14.5"/><path d="M20.5 13v1.5A3.5 3.5 0 0 1 17 18H3.5"/>',

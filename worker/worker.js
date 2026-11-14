@@ -890,9 +890,21 @@ function googleToDays(raw, tz) {
     let mins = gNum(s.minutesAsleep);
     if (mins == null) mins = (Date.parse(iv.endTime) - Date.parse(iv.startTime)) / 60000 - (gNum(s.minutesAwake) || 0);
     const d = gDate(iv.endTime, iv.endUtcOffset, tz);
-    if (d && mins > 0) (sleep[d] = sleep[d] || []).push({ dp, mins });
+    const hm = (t, off) => {
+      const ms = Date.parse(t);
+      if (!Number.isFinite(ms)) return null;
+      return off != null && off !== '' ? new Date(ms + gSecs(off) * 1000).toISOString().slice(11, 16) : localParts(ms, tz).hhmm;
+    };
+    if (d && mins > 0) (sleep[d] = sleep[d] || []).push({ dp, mins, bed: hm(iv.startTime, iv.startUtcOffset), wake: hm(iv.endTime, iv.endUtcOffset) });
   }
-  for (const [d, list] of Object.entries(sleep)) day(d).sleep_hours = Math.round((preferBand(list).reduce((a, x) => a + x.mins, 0) / 60) * 100) / 100;
+  for (const [d, list] of Object.entries(sleep)) {
+    const use = preferBand(list);
+    const r = day(d);
+    r.sleep_hours = Math.round((use.reduce((a, x) => a + x.mins, 0) / 60) * 100) / 100;
+    const main = use.reduce((a, x) => (x.mins > a.mins ? x : a));
+    r.sleep_bed = main.bed;
+    r.sleep_wake = main.wake;
+  }
   // Workouts: every session, with minutes and calories.
   for (const dp of raw.exercise || []) {
     const b = gBody(dp);

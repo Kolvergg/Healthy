@@ -88,6 +88,7 @@ export const DEFAULT_SETTINGS = {
     sizes: [150, 250, 400, 600],
     reminders: { enabled: true, weekday: { start: '08:00', end: '21:00', interval: 90 }, weekend: { start: '09:30', end: '21:30', interval: 90 } },
   },
+  activity: { stepGoal: 8000 },
   sleep: { nights: nights(), windDown: { enabled: true, minutes: 45 }, wakeReminder: false },
   medSlots: [
     { id: 'morning', name: 'Morning', mode: 'fixed', weekday: '08:00', weekend: '09:15' },

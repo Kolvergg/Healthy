@@ -26,6 +26,17 @@ test('real sleep response: minutes asleep → hours, dated the morning you woke 
   // Woke 07:32 on 13 Oct: 398 min.
   assert.equal(by['2026-10-13'].sleep_hours, 6.63);
   assert.equal(by['2026-10-13'].source, 'Google Health');
+  assert.equal(by['2026-10-12'].sleep_bed, '22:50');
+  assert.equal(by['2026-10-12'].sleep_wake, '07:33');
+});
+
+test('a sleep logged by hand in the Google Health app is used when the band has none', () => {
+  const manual = { dataSource: { platform: 'FITBIT', recordingMethod: 'MANUAL', device: { formFactor: 'PHONE' } }, sleep: { interval: { startTime: '2026-11-13T12:30:00Z', startUtcOffset: '39600s', endTime: '2026-11-13T20:00:00Z', endUtcOffset: '39600s' }, type: 'CLASSIC', summary: {} } };
+  const [d] = T.googleToDays({ sleep: [manual] }, TZ);
+  assert.equal(d.date, '2026-11-14');
+  assert.equal(d.sleep_hours, 7.5);
+  assert.equal(d.sleep_bed, '23:30');
+  assert.equal(d.sleep_wake, '07:00');
 });
 
 test('real exercise response: workouts per day with minutes, calories and app', () => {

@@ -7,7 +7,7 @@ import { esc, icon, sheet, liveSheet, toast, confirmSheet, download, toggleHtml,
 import { register, rerender } from './state.js';
 import { afcdImport } from './food.js';
 
-export const APP_VERSION = '2.2.0';
+export const APP_VERSION = '2.3.0';
 let connMsg = '';
 const ago = t => (t ? new Date(t).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' }) : 'never');
 const mins = t => {
@@ -246,7 +246,7 @@ async function googleRun(b, days) {
   }
 }
 
-function openSection(k) {
+export function openSection(k) {
   const [title, fn] = SECTIONS[k];
   if (k === 'conn') connMsg = '';
   liveSheet({ title, render: fn });
